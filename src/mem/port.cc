@@ -188,7 +188,7 @@ RequestPort::printAddr(Addr a)
 }
 
 void
-RequestPort::addTrace(PacketPtr pkt) const
+RequestPort::addTraceSlow(PacketPtr pkt) const
 {
     if (!gem5::debug::PortTrace || !pkt)
         return;
@@ -201,7 +201,7 @@ RequestPort::addTrace(PacketPtr pkt) const
 }
 
 void
-RequestPort::removeTrace(PacketPtr pkt) const
+RequestPort::removeTraceSlow(PacketPtr pkt) const
 {
     if (!gem5::debug::PortTrace || !pkt)
         return;

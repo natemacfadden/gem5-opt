@@ -87,6 +87,18 @@ class NetDest
     bool isBroadcast() const;
     bool isEmpty() const;
 
+    // Per-MachineType-set helpers for routing fast paths.
+    bool
+    intersectsAt(int i, const NetDest &other) const
+    {
+        return !m_bits[i].intersectionIsEmpty(other.m_bits[i]);
+    }
+    bool
+    isEmptyAt(int i) const
+    {
+        return m_bits[i].isEmpty();
+    }
+
     // For Princeton Network
     std::vector<NodeID> getAllDest();
 

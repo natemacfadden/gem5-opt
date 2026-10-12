@@ -77,6 +77,9 @@ class WeightBased : public BaseRoutingUnit
         const std::vector<MessageBuffer*> m_out_buffers;
         int m_order;
         int m_weight;
+        // Indices of the non-empty per-MachineType sets of
+        // m_routing_entry; a destination can only intersect there.
+        std::vector<int> m_nonempty_sets;
     };
 
     std::vector<std::unique_ptr<LinkInfo>> m_links;

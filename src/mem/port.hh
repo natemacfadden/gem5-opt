@@ -52,6 +52,7 @@
 #include <string>
 
 #include "base/addr_range.hh"
+#include "debug/PortTrace.hh"
 #include "mem/packet.hh"
 #include "mem/protocol/atomic.hh"
 #include "mem/protocol/functional.hh"
@@ -325,8 +326,24 @@ class RequestPort: public Port, public AtomicRequestProtocol,
     }
 
   private:
-    void addTrace(PacketPtr pkt) const;
-    void removeTrace(PacketPtr pkt) const;
+    // The PortTrace flag test is inline: these run on every atomic and
+    // timing hop, and the flag is almost always off.
+    void
+    addTrace(PacketPtr pkt) const
+    {
+        if (debug::PortTrace) {
+            addTraceSlow(pkt);
+        }
+    }
+    void
+    removeTrace(PacketPtr pkt) const
+    {
+        if (debug::PortTrace) {
+            removeTraceSlow(pkt);
+        }
+    }
+    void addTraceSlow(PacketPtr pkt) const;
+    void removeTraceSlow(PacketPtr pkt) const;
 };
 
 class [[deprecated]] MasterPort : public RequestPort

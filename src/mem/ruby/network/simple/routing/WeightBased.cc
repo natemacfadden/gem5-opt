@@ -63,10 +63,14 @@ WeightBased::addOutPort(LinkID link_id,
                     int link_weight)
 {
     gem5_assert(link_id == m_links.size(), "WeightBased::addOutPort");
-    m_links.emplace_back(new LinkInfo{link_id,
-                        routing_table_entry,
-                        m_out_buffer,
-                        0, link_weight});
+    m_links.emplace_back(new LinkInfo{
+        link_id, routing_table_entry, m_out_buffer, 0, link_weight, {}});
+    LinkInfo &info = *m_links.back();
+    for (int i = 0; i < info.m_routing_entry.getSize(); i++) {
+        if (!info.m_routing_entry.isEmptyAt(i)) {
+            info.m_nonempty_sets.push_back(i);
+        }
+    }
     sortLinks();
 }
 
@@ -111,7 +115,16 @@ WeightBased::findRoute(const Message &msg,
     assert(out_links.size() == 0);
     for (auto &link : m_links) {
         const NetDest &dst = link->m_routing_entry;
-        if (msg_dsts.intersectionIsNotEmpty(dst)) {
+        // Same as msg_dsts.intersectionIsNotEmpty(dst), checking only
+        // the sets where dst has members.
+        bool intersects = false;
+        for (int i : link->m_nonempty_sets) {
+            if (msg_dsts.intersectsAt(i, dst)) {
+                intersects = true;
+                break;
+            }
+        }
+        if (intersects) {
             // Need to remember which destinations need this message in
             // another vector.  This Set is the intersection of the
             // routing_table entry and the current destination set.
@@ -120,6 +133,11 @@ WeightBased::findRoute(const Message &msg,
             // Next, we update the msg_destination not to include
             // those nodes that were already handled by this link
             msg_dsts.removeNetDest(dst);
+
+            // Nothing left to route: no later link can intersect.
+            if (msg_dsts.isEmpty()) {
+                break;
+            }
         }
     }
 
