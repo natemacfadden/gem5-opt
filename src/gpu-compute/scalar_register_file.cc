@@ -49,7 +49,7 @@ ScalarRegisterFile::ScalarRegisterFile(const ScalarRegisterFileParams &p)
 }
 
 bool
-ScalarRegisterFile::operandsReady(Wavefront *w, GPUDynInstPtr ii) const
+ScalarRegisterFile::operandsReady(Wavefront *w, const GPUDynInstPtr &ii) const
 {
     for (const auto& srcScalarOp : ii->srcScalarRegOperands()) {
         for (const auto& physIdx : srcScalarOp.physIndices()) {

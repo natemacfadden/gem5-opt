@@ -53,7 +53,8 @@ class VectorRegisterFile : public RegisterFile
     VectorRegisterFile(const VectorRegisterFileParams &p);
     ~VectorRegisterFile() { }
 
-    virtual bool operandsReady(Wavefront *w, GPUDynInstPtr ii) const override;
+    virtual bool operandsReady(Wavefront *w,
+                               const GPUDynInstPtr &ii) const override;
     virtual void scheduleWriteOperands(Wavefront *w,
                                        GPUDynInstPtr ii) override;
     virtual void scheduleWriteOperandsFromLoad(Wavefront *w,

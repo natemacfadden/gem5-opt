@@ -139,7 +139,7 @@ ScoreboardCheckStage::ready(Wavefront *w, nonrdytype_e *rdyStatus,
     }
 
     // Check next instruction from instruction buffer
-    GPUDynInstPtr ii = w->nextInstr();
+    const GPUDynInstPtr &ii = w->nextInstr();
     // Only instruction in the instruction buffer has been dispatched.
     // No need to check it again for readiness
     if (!ii) {
@@ -162,7 +162,12 @@ ScoreboardCheckStage::ready(Wavefront *w, nonrdytype_e *rdyStatus,
     DPRINTF(GPUExec, "CU%d: WF[%d][%d]: Checking Ready for Inst : %s\n",
             computeUnit.cu_id, w->simdId, w->wfSlotId, ii->disassemble());
     w->lastInstSeqNum = ii->seqNum();
-    w->lastInstDisasm = ii->disassemble();
+    // lastInstDisasm is only read by Wavefront::printProgress(), which runs
+    // only with a nonzero progress interval; skip generating and copying
+    // the disassembly string otherwise.
+    if (computeUnit.shader->getProgressInterval() != 0) {
+        w->lastInstDisasm = ii->disassemble();
+    }
 
     // Non-scalar (i.e., vector) instructions may use VGPRs
     if (!ii->isScalar()) {
@@ -230,7 +235,7 @@ ScoreboardCheckStage::ready(Wavefront *w, nonrdytype_e *rdyStatus,
 int
 ScoreboardCheckStage::mapWaveToExeUnit(Wavefront *w)
 {
-    GPUDynInstPtr ii = w->nextInstr();
+    const GPUDynInstPtr &ii = w->nextInstr();
     assert(ii);
     if (ii->isFlat()) {
         /**

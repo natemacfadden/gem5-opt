@@ -55,7 +55,8 @@ class ScalarRegisterFile : public RegisterFile
     ScalarRegisterFile(const ScalarRegisterFileParams &p);
     ~ScalarRegisterFile() { }
 
-    virtual bool operandsReady(Wavefront *w, GPUDynInstPtr ii) const override;
+    virtual bool operandsReady(Wavefront *w,
+                               const GPUDynInstPtr &ii) const override;
     virtual void scheduleWriteOperands(Wavefront *w,
                                        GPUDynInstPtr ii) override;
     virtual void scheduleWriteOperandsFromLoad(Wavefront *w,

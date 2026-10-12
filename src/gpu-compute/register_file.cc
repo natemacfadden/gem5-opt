@@ -81,15 +81,9 @@ RegisterFile::dump() const
 // Scoreboard functions
 
 bool
-RegisterFile::operandsReady(Wavefront *w, GPUDynInstPtr ii) const
+RegisterFile::operandsReady(Wavefront *w, const GPUDynInstPtr &ii) const
 {
     return true;
-}
-
-bool
-RegisterFile::regBusy(int idx) const
-{
-    return busy.at(idx);
 }
 
 void

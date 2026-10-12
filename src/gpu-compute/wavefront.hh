@@ -90,6 +90,11 @@ class InstructionBuffer
         return buf.front();
     }
     const GPUDynInstPtr &
+    operator[](std::size_t i) const
+    {
+        return buf[i];
+    }
+    const GPUDynInstPtr &
     front() const
     {
         return buf.front();
@@ -231,7 +236,7 @@ class Wavefront : public SimObject
     // first accumulation vgpr number
     uint32_t accumOffset;
     void freeResources();
-    GPUDynInstPtr nextInstr();
+    const GPUDynInstPtr &nextInstr() const;
     void setStatus(status_e newStatus);
     status_e getStatus() { return status; }
     std::string statusToString(status_e status);

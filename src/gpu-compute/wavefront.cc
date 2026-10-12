@@ -1266,20 +1266,20 @@ Wavefront::exec()
     }
 }
 
-GPUDynInstPtr
-Wavefront::nextInstr()
+const GPUDynInstPtr &
+Wavefront::nextInstr() const
 {
+    static const GPUDynInstPtr noInst;
     // Read next instruction from instruction buffer
-    GPUDynInstPtr ii = instructionBuffer.front();
+    const GPUDynInstPtr &ii = instructionBuffer.front();
     // if the WF has been dispatched in the schedule stage then
     // check the next oldest instruction for readiness
     if (computeUnit->pipeMap.find(ii->seqNum()) !=
         computeUnit->pipeMap.end()) {
         if (instructionBuffer.size() > 1) {
-            auto it = instructionBuffer.begin() + 1;
-            return *it;
+            return instructionBuffer[1];
         } else { // No new instructions to check
-            return nullptr;
+            return noInst;
         }
     }
     return ii;

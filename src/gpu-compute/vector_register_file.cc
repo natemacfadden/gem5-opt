@@ -57,7 +57,7 @@ VectorRegisterFile::VectorRegisterFile(const VectorRegisterFileParams &p)
 }
 
 bool
-VectorRegisterFile::operandsReady(Wavefront *w, GPUDynInstPtr ii) const
+VectorRegisterFile::operandsReady(Wavefront *w, const GPUDynInstPtr &ii) const
 {
     bool src_ready = true, dst_ready=true;
     for (const auto& srcVecOp : ii->srcVecRegOperands()) {

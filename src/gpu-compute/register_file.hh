@@ -64,8 +64,13 @@ class RegisterFile : public SimObject
     // State functions
 
     // Scoreboard functions
-    virtual bool operandsReady(Wavefront *w, GPUDynInstPtr ii) const;
-    virtual bool regBusy(int idx) const;
+    virtual bool operandsReady(Wavefront *w, const GPUDynInstPtr &ii) const;
+    // no subclass overrides this; inline so operandsReady() loops are cheap
+    bool
+    regBusy(int idx) const
+    {
+        return busy.at(idx);
+    }
     virtual void markReg(int regIdx, bool value);
 
     // Abstract Register Event
