@@ -55,6 +55,12 @@ class VectorRegisterFile : public RegisterFile
 
     virtual bool operandsReady(Wavefront *w,
                                const GPUDynInstPtr &ii) const override;
+    /**
+     * Side-effect-free twin of operandsReady() for the scoreboard idle
+     * check: returns true when operandsReady() would return false, and
+     * sets raw/wax to the RAW/WAX stall stats it would add (0 or 1 each).
+     */
+    bool operandsBlocked(const GPUDynInstPtr &ii, int &raw, int &wax) const;
     virtual void scheduleWriteOperands(Wavefront *w,
                                        GPUDynInstPtr ii) override;
     virtual void scheduleWriteOperandsFromLoad(Wavefront *w,

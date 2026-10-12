@@ -49,6 +49,32 @@ ScalarRegisterFile::ScalarRegisterFile(const ScalarRegisterFileParams &p)
 }
 
 bool
+ScalarRegisterFile::operandsBlocked(const GPUDynInstPtr &ii, int &raw,
+                                    int &wax) const
+{
+    // Same loops as operandsReady(), without the stats and DPRINTFs.
+    raw = 0;
+    wax = 0;
+    for (const auto &srcScalarOp : ii->srcScalarRegOperands()) {
+        for (const auto &physIdx : srcScalarOp.physIndices()) {
+            if (regBusy(physIdx)) {
+                raw = 1;
+                return true;
+            }
+        }
+    }
+    for (const auto &dstScalarOp : ii->dstScalarRegOperands()) {
+        for (const auto &physIdx : dstScalarOp.physIndices()) {
+            if (regBusy(physIdx)) {
+                wax = 1;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool
 ScalarRegisterFile::operandsReady(Wavefront *w, const GPUDynInstPtr &ii) const
 {
     for (const auto& srcScalarOp : ii->srcScalarRegOperands()) {

@@ -57,6 +57,40 @@ VectorRegisterFile::VectorRegisterFile(const VectorRegisterFileParams &p)
 }
 
 bool
+VectorRegisterFile::operandsBlocked(const GPUDynInstPtr &ii, int &raw,
+                                    int &wax) const
+{
+    // Same loops as operandsReady(), without the stats and DPRINTFs.
+    raw = 0;
+    wax = 0;
+    for (const auto &srcVecOp : ii->srcVecRegOperands()) {
+        for (const auto &physIdx : srcVecOp.physIndices()) {
+            if (regBusy(physIdx) &&
+                !computeUnit->rfc[simdId]->inRFC(physIdx)) {
+                raw = 1;
+                break;
+            }
+        }
+        if (raw) {
+            break;
+        }
+    }
+    for (const auto &dstVecOp : ii->dstVecRegOperands()) {
+        for (const auto &physIdx : dstVecOp.physIndices()) {
+            if (regBusy(physIdx) &&
+                !computeUnit->rfc[simdId]->inRFC(physIdx)) {
+                wax = 1;
+                break;
+            }
+        }
+        if (wax) {
+            break;
+        }
+    }
+    return raw || wax;
+}
+
+bool
 VectorRegisterFile::operandsReady(Wavefront *w, const GPUDynInstPtr &ii) const
 {
     bool src_ready = true, dst_ready=true;

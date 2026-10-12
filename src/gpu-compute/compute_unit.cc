@@ -44,10 +44,12 @@
 #include "debug/GPUPrefetch.hh"
 #include "debug/GPUReg.hh"
 #include "debug/GPURename.hh"
+#include "debug/GPUSRF.hh"
 #include "debug/GPUSched.hh"
 #include "debug/GPUSync.hh"
 #include "debug/GPUTLB.hh"
 #include "debug/GPUTrace.hh"
+#include "debug/GPUVRF.hh"
 #include "enums/GfxVersion.hh"
 #include "gpu-compute/dispatcher.hh"
 #include "gpu-compute/gpu_command_processor.hh"
@@ -923,8 +925,9 @@ ComputeUnit::exec()
 {
     bool idle = false;
     if (idleCached && !idleDirty &&
-        !(TRACING_ON && (debug::GPUSched || debug::GPUSync ||
-                         debug::GPUFetch || debug::GPUExec))) {
+        !(TRACING_ON &&
+          (debug::GPUSched || debug::GPUSync || debug::GPUFetch ||
+           debug::GPUExec || debug::GPUVRF || debug::GPUSRF))) {
         // Nothing woke this CU since the last (idle) cycle.
         idle = true;
 #ifdef CU_DIRTY_CHECK

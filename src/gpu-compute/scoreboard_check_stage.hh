@@ -83,10 +83,13 @@ class ScoreboardCheckStage
     void exec();
     /**
      * True when exec() would find no ready wave and have no side effect
-     * other than the stall counts and lastInstRdyStatus (every running
-     * wave waits on a waitcnt, a barrier or an empty IB, or is
-     * stopped/returning/stalled). On true, the per-status counts and the
-     * waves' statuses are kept for idleCycle().
+     * other than the stall counts, lastInstRdyStatus, lastInstSeqNum and
+     * the waves RAW/WAX stall counts (every running wave waits on a
+     * waitcnt, a barrier, an empty IB or busy VGPR/SGPR operands, or is
+     * stopped/returning/stalled). idleCycle() effects are the same on
+     * every cycle while nothing outside exec() changes CU state. On true,
+     * the per-status counts and the waves' statuses are kept for
+     * idleCycle().
      */
     bool idleNoop();
     // Exactly the effect of exec() when idleNoop() just returned true.
@@ -113,7 +116,17 @@ class ScoreboardCheckStage
 
     // Filled by idleNoop() for idleCycle().
     std::array<uint64_t, NRDY_CONDITIONS> idleCnt;
-    std::vector<std::pair<Wavefront *, nonrdytype_e>> idleWaves;
+    struct IdleWave
+    {
+        Wavefront *w;
+        nonrdytype_e st;
+        // VGPR/SGPR-busy waves only: the seqNum ready() records and the
+        // RAW/WAX stall stats it adds each cycle (0 or 1 each).
+        uint64_t seqNum;
+        int raw;
+        int wax;
+    };
+    std::vector<IdleWave> idleWaves;
 
     const char *
     rdyStatusStr(const nonrdytype_e &rdyStatus)

@@ -32,8 +32,10 @@
 #include "gpu-compute/scoreboard_check_stage.hh"
 
 #include "debug/GPUExec.hh"
+#include "debug/GPUSRF.hh"
 #include "debug/GPUSched.hh"
 #include "debug/GPUSync.hh"
+#include "debug/GPUVRF.hh"
 #include "gpu-compute/compute_unit.hh"
 #include "gpu-compute/gpu_static_inst.hh"
 #include "gpu-compute/scalar_register_file.hh"
@@ -355,10 +357,45 @@ ScoreboardCheckStage::idleNoop()
             } else if (w->instructionBuffer.empty()) {
                 st = NRDY_IB_EMPTY;
             } else {
-                return false;
+                // Running wave with a non-empty IB: idle only while its next
+                // instruction waits on busy VGPR/SGPR operands (same checks,
+                // same order as ready(); the RF stall stats and
+                // lastInstSeqNum are replayed by idleCycle()).
+                const GPUDynInstPtr &ii = w->nextInstr();
+                if (!ii) {
+                    st = NRDY_IB_EMPTY;
+                } else {
+                    if (!(ii->isBarrier() || ii->isNop() || ii->isReturn() ||
+                          ii->isBranch() || ii->isALU() || ii->isLoad() ||
+                          ii->isStore() || ii->isAtomic() ||
+                          ii->isEndOfKernel() || ii->isMemSync() ||
+                          ii->isFlat() || ii->isFlatGlobal() ||
+                          ii->isFlatScratch() || ii->isSleep() ||
+                          ii->isLocalMem())) {
+                        return false; // ready() panics; take the full path
+                    }
+                    if (computeUnit.shader->getProgressInterval() != 0 ||
+                        (TRACING_ON && (debug::GPUVRF || debug::GPUSRF))) {
+                        return false; // ready() has more effects here
+                    }
+                    int raw, wax;
+                    if (!ii->isScalar() &&
+                        computeUnit.vrf[w->simdId]->operandsBlocked(ii, raw,
+                                                                    wax)) {
+                        st = NRDY_VGPR_NRDY;
+                    } else if (computeUnit.srf[w->simdId]->operandsBlocked(
+                                   ii, raw, wax)) {
+                        st = NRDY_SGPR_NRDY;
+                    } else {
+                        return false;
+                    }
+                    ++idleCnt[st];
+                    idleWaves.push_back({w, st, ii->seqNum(), raw, wax});
+                    continue;
+                }
             }
             ++idleCnt[st];
-            idleWaves.emplace_back(w, st);
+            idleWaves.push_back({w, st, 0, 0, 0});
         }
     }
     idleCnt[NRDY_WF_STOP] += numStopped;
@@ -372,7 +409,16 @@ ScoreboardCheckStage::idleCycle()
     // schedule stage's idle check saw every ready list empty), and each
     // wave gets its status string and one stall count.
     for (const auto &p : idleWaves) {
-        p.first->lastInstRdyStatus = rdyStatusStr(p.second);
+        p.w->lastInstRdyStatus = rdyStatusStr(p.st);
+        if (p.st == NRDY_VGPR_NRDY || p.st == NRDY_SGPR_NRDY) {
+            p.w->lastInstSeqNum = p.seqNum;
+            if (p.raw) {
+                p.w->stats.numTimesBlockedDueRAWDependencies++;
+            }
+            if (p.wax) {
+                p.w->stats.numTimesBlockedDueWAXDependencies++;
+            }
+        }
     }
     for (int i = 0; i < NRDY_CONDITIONS; ++i) {
         stats.pendStallCycles[i] += idleCnt[i];

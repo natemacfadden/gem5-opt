@@ -164,6 +164,9 @@ RegisterFileCache::enqCacheInsertEvent(uint32_t regIdx, uint64_t delay)
 void
 RegisterFileCache::MarkRegCachedEvent::process()
 {
+    // inRFC() decides VGPR readiness in the scoreboard, so a cache insert
+    // is a wake source for the CU idle-cycle cache.
+    rfc->computeUnit->markDirty();
     rfc->markRFC(regIdx);
 }
 
