@@ -993,7 +993,21 @@ public:
         value = vptr;
     }
     bool try_implicit_casts(handle src, bool convert) {
+        // gem5: only descend into registered derived types that src is
+        // actually an instance of. A failed sub-load of an unrelated
+        // derived type is expensive (it probes for foreign module-local
+        // types and the cpp conduit, raising and formatting an
+        // AttributeError each time), and with the wide SimObject class
+        // hierarchy every Group* / SimObject* argument conversion walked
+        // hundreds of unrelated siblings. An unrelated type could only
+        // match via implicit conversions, foreign module-local types or
+        // a conduit, which gem5 does not use for these types.
+        PyTypeObject *srctype = Py_TYPE(src.ptr());
         for (const auto &cast : typeinfo->implicit_casts) {
+            const type_info *sub_tinfo = get_type_info(*cast.first);
+            if (sub_tinfo && !PyType_IsSubtype(srctype, sub_tinfo->type)) {
+                continue;
+            }
             type_caster_generic sub_caster(*cast.first);
             if (sub_caster.load(src, convert)) {
                 value = cast.second(sub_caster.value);
