@@ -52,22 +52,15 @@ GPUDynInst::GPUDynInst(ComputeUnit *_cu, Wavefront *_wf,
     statusVector.assign(TheGpuISA::NumVecElemPerVecReg, 0);
     tlbHitLevel.assign(computeUnit()->wfSize(), -1);
     // vector instructions can have up to 4 source/destination operands
-    d_data = new uint8_t[computeUnit()->wfSize() * 4 * sizeof(double)];
-    a_data = new uint8_t[computeUnit()->wfSize() * 8];
-    x_data = new uint8_t[computeUnit()->wfSize() * 8];
+    // Zero-initialize via value-initializing new[] (one memset each)
+    // instead of byte loops that re-read wfSize() every iteration.
+    const int wf_size = computeUnit()->wfSize();
+    d_data = new uint8_t[wf_size * 4 * sizeof(double)]();
+    a_data = new uint8_t[wf_size * 8]();
+    x_data = new uint8_t[wf_size * 8]();
     // scalar loads can read up to 16 Dwords of data (see publicly
     // available Vega ISA manual)
-    scalar_data = new uint8_t[16 * sizeof(uint32_t)];
-    for (int i = 0; i < (16 * sizeof(uint32_t)); ++i) {
-        scalar_data[i] = 0;
-    }
-    for (int i = 0; i < (computeUnit()->wfSize() * 8); ++i) {
-        a_data[i] = 0;
-        x_data[i] = 0;
-    }
-    for (int i = 0; i < (computeUnit()->wfSize() * 4 * sizeof(double)); ++i) {
-        d_data[i] = 0;
-    }
+    scalar_data = new uint8_t[16 * sizeof(uint32_t)]();
     time = 0;
 
     cu_id = _cu->cu_id;
