@@ -50,9 +50,12 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "base/intmath.hh"
 #include "base/trace.hh"
@@ -410,9 +413,21 @@ PhysicalMemory::serializeStore(CheckpointOut &cp, unsigned int store_id,
 
 }
 
+namespace
+{
+/** Where unserializeStore() queues its work while unserialize() runs. */
+std::vector<std::function<std::string()>> *pendingRestores = nullptr;
+} // anonymous namespace
+
 void
 PhysicalMemory::unserialize(CheckpointIn &cp)
 {
+    // unserializeStore() queues the decompression of each gzip image
+    // here instead of doing it; they are independent (separate files,
+    // disjoint destination memory), so they run in parallel below.
+    std::vector<std::function<std::string()>> jobs;
+    pendingRestores = &jobs;
+
     // unserialize the locked addresses and map them to the
     // appropriate memory controller
     std::vector<Addr> lal_addr;
@@ -432,7 +447,24 @@ PhysicalMemory::unserialize(CheckpointIn &cp)
         ScopedCheckpointSection sec(cp, csprintf("store%d", i));
         unserializeStore(cp);
     }
+    pendingRestores = nullptr;
 
+    std::vector<std::string> errs(jobs.size());
+    std::vector<std::thread> threads;
+    for (size_t i = 1; i < jobs.size(); i++) {
+        threads.emplace_back([&, i] { errs[i] = jobs[i](); });
+    }
+    if (!jobs.empty()) {
+        errs[0] = jobs[0]();
+    }
+    for (auto &t : threads) {
+        t.join();
+    }
+    for (const auto &e : errs) {
+        if (!e.empty()) {
+            fatal("%s", e);
+        }
+    }
 }
 
 namespace
@@ -550,6 +582,24 @@ class RestoreSink
             p += n;
             len -= n;
         }
+    }
+
+    /**
+     * Append @p pages whole pages of zeros (at most room()). Only valid
+     * while produced() is page aligned.
+     */
+    void
+    putZeroPages(uint64_t pages)
+    {
+        if (!pages) {
+            return;
+        }
+        if (!zeroRun) {
+            zeroStart = out;
+        }
+        zeroRun += pages * restorePageSize;
+        crcVal = zeroCrc.extend(crcVal, pages);
+        out += pages * restorePageSize;
     }
 
     void
@@ -732,6 +782,9 @@ class FastInflater
         uint16_t fast[1 << fastBits];
         uint16_t count[maxBits + 1];
         uint16_t symbol[288];
+        // LSB-first code and length of each symbol (length 0: unused)
+        uint16_t rcode[288];
+        uint8_t clen[288];
     };
 
     const uint8_t *in;
@@ -780,6 +833,8 @@ class FastInflater
     bool build(Huffman &h, const uint8_t *lengths, int n);
     int decode(const Huffman &h);
     bool flush(bool final);
+    bool zeroFill(uint64_t n);
+    uint64_t skipZeroMatches();
     bool codes();
     bool stored();
     bool fixedBlock();
@@ -817,22 +872,131 @@ FastInflater::build(Huffman &h, const uint8_t *lengths, int n)
 
     // Fast table: canonical codes, bit-reversed for LSB-first reading.
     std::memset(h.fast, 0, sizeof(h.fast));
+    std::memset(h.clen, 0, sizeof(h.clen));
     uint32_t code = 0;
     int idx = 0;
     for (int len = 1; len <= maxBits; len++) {
         for (int k = 0; k < h.count[len]; k++, idx++, code++) {
-            if (len > fastBits) {
-                continue;
-            }
             uint32_t rev = 0;
             for (int b = 0; b < len; b++) {
                 rev |= ((code >> b) & 1) << (len - 1 - b);
+            }
+            h.rcode[h.symbol[idx]] = rev;
+            h.clen[h.symbol[idx]] = len;
+            if (len > fastBits) {
+                continue;
             }
             for (uint32_t f = rev; f < (1u << fastBits); f += 1u << len) {
                 h.fast[f] = h.symbol[idx] << 4 | len;
             }
         }
         code <<= 1;
+    }
+    return true;
+}
+
+/**
+ * Called right after a (length 258, distance 1) match that wrote zeros.
+ * A memory image is mostly zero, which deflate codes as a long series
+ * of exactly that match, i.e. one fixed bit pattern repeated. Consume
+ * as many further repeats as directly follow in the bit stream (but no
+ * more than the destination can take) and return how many there were.
+ * Each repeat is exactly what decode(lencode) + decode(distcode) would
+ * have read as symbol 285 (length 258, no extra bits) and distance
+ * symbol 0 (distance 1, no extra bits), so the decoded output is the
+ * same: 258 more zero bytes each. The caller emits them via zeroFill().
+ */
+uint64_t
+FastInflater::skipZeroMatches()
+{
+    int l1 = lencode.clen[285], l2 = distcode.clen[0];
+    if (!l1 || !l2) {
+        return 0;
+    }
+    int k = l1 + l2;
+    uint64_t pat = lencode.rcode[285] | (uint64_t)distcode.rcode[0] << l1;
+    // m repeats at once, m * k <= 56 (refill() leaves more than 56 bits)
+    int m = 56 / k;
+    uint64_t patm = 0;
+    for (int i = 0; i < m; i++) {
+        patm |= pat << (i * k);
+    }
+    uint64_t maskm = (1ull << (m * k)) - 1;
+    uint64_t mask = (1ull << k) - 1;
+
+    // Output that may still be produced: what the sink can take, minus
+    // what is decoded but not yet handed over.
+    uint64_t pend = pos - emitted;
+    uint64_t room = sink.room() > pend ? sink.room() - pend : 0;
+    uint64_t maxReps = room / 258;
+
+    uint64_t r = 0;
+    for (;;) {
+        if (bitCnt <= 56) {
+            refill();
+        }
+        // Never act on bits made up past the end of the input.
+        if (overread) {
+            break;
+        }
+        if (r + m <= maxReps && (bitBuf & maskm) == patm) {
+            bitBuf >>= m * k;
+            bitCnt -= m * k;
+            r += m;
+        } else if (r < maxReps && (bitBuf & mask) == pat) {
+            bitBuf >>= k;
+            bitCnt -= k;
+            r++;
+        } else {
+            break;
+        }
+    }
+    return r;
+}
+
+/**
+ * Append @p n zero bytes to the output, with the same result as @p n
+ * literal zeros. Long runs are not materialized: whole zero pages go
+ * to the sink as a page count, and the window becomes all zeros.
+ */
+bool
+FastInflater::zeroFill(uint64_t n)
+{
+    uint8_t *b = buf.get();
+    if (n >= windowSize + 2 * restorePageSize) {
+        // Pad (in the buffer) up to an output page boundary.
+        uint64_t head =
+            (restorePageSize - total % restorePageSize) % restorePageSize;
+        std::memset(b + pos, 0, head);
+        pos += head;
+        total += head;
+        n -= head;
+        // The sink has only been handed whole pages so far (flush(false)
+        // hands over page multiples), and total is page aligned now, so
+        // the pending part is whole pages too.
+        size_t pend = pos - emitted;
+        if (pend + n > sink.room()) {
+            return false; // image larger than the memory: let zlib do it
+        }
+        sink.put(b + emitted, pend);
+        uint64_t pages = n / restorePageSize;
+        sink.putZeroPages(pages);
+        total += pages * restorePageSize;
+        n -= pages * restorePageSize;
+        // n >= windowSize before this, so the last windowSize bytes of
+        // output (all a later match may refer to) are zero.
+        std::memset(b, 0, windowSize);
+        pos = emitted = windowSize;
+    }
+    while (n) {
+        if (pos >= windowSize + chunk && !flush(false)) {
+            return false;
+        }
+        size_t c = std::min<uint64_t>(n, windowSize + chunk + 258 - pos);
+        std::memset(b + pos, 0, c);
+        pos += c;
+        total += c;
+        n -= c;
     }
     return true;
 }
@@ -943,6 +1107,15 @@ FastInflater::codes()
             uint8_t *o = b + pos;
             if (dist == 1) {
                 std::memset(o, o[-1], len);
+                if (len == 258 && o[-1] == 0) {
+                    pos += len;
+                    total += len;
+                    uint64_t r = skipZeroMatches();
+                    if (r && !zeroFill(r * 258)) {
+                        return false;
+                    }
+                    continue;
+                }
             } else {
                 size_t left = len;
                 while (left) {
@@ -1209,13 +1382,26 @@ PhysicalMemory::unserializeStore(CheckpointIn &cp)
         // gzip: inflate ourselves, skipping writes of all-zero pages.
         // Untouched private anonymous memory already reads as zero.
         bool anon = backingStore[store_id].shmFd == -1;
-        std::string err;
-        int64_t got = inflateGzipImage(file_data, file_size, pmem,
-                                       range.size(), anon, err);
-        munmap(const_cast<uint8_t *>(file_data), file_size);
-        if (got < 0) {
-            fatal("Error reading physical memory checkpoint file '%s': %s\n",
-                  filename, err);
+        uint64_t size = range.size();
+        auto job = [=]() -> std::string {
+            std::string err;
+            int64_t got =
+                inflateGzipImage(file_data, file_size, pmem, size, anon, err);
+            munmap(const_cast<uint8_t *>(file_data), file_size);
+            if (got < 0) {
+                return csprintf("Error reading physical memory checkpoint "
+                                "file '%s': %s\n",
+                                filename, err);
+            }
+            return std::string();
+        };
+        if (pendingRestores) {
+            pendingRestores->push_back(job);
+        } else {
+            std::string err = job();
+            if (!err.empty()) {
+                fatal("%s", err);
+            }
         }
         return;
     }
