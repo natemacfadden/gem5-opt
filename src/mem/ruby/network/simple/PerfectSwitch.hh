@@ -126,6 +126,13 @@ class PerfectSwitch : public Consumer
     SimpleNetwork* m_network_ptr;
     std::vector<int> m_pending_message_count;
 
+    // Per vnet and priority group, one bit per in-port (64 per word),
+    // set while that port may hold messages (MessageBuffer::
+    // setNonEmptyMask); wakeups skip ports that are certainly empty.
+    std::vector<std::vector<std::vector<uint64_t>>> m_in_nonempty;
+    bool m_in_nonempty_ready = false;
+    void setupNonEmptyMasks();
+
     MessageBuffer* inBuffer(int in_port, int vnet) const;
 };
 

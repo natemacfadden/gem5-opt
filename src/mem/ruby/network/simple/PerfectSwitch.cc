@@ -42,6 +42,7 @@
 
 #include <algorithm>
 
+#include "base/bitfield.hh"
 #include "base/cast.hh"
 #include "base/cprintf.hh"
 #include "base/random.hh"
@@ -160,14 +161,19 @@ PerfectSwitch::operateVnet(int vnet)
     Tick current_time = m_switch->clockEdge();
     static thread_local std::vector<int> ready_ports;
 
-    for (auto &in : m_in_prio_groups[vnet]) {
+    for (int g = 0; g < m_in_prio_groups[vnet].size(); ++g) {
+        auto &in = m_in_prio_groups[vnet][g];
+        // Empty ports (bit clear) have readyTime() MaxTick, so they can
+        // be neither the start port nor ready; visit set bits in order.
+        auto &nonempty = m_in_nonempty[vnet][g];
         // first check the port with the oldest message
         unsigned start_in_port = 0;
         Tick lowest_tick = MaxTick;
         ready_ports.clear();
-        for (int i = 0; i < in.size(); ++i) {
-            MessageBuffer *buffer = in[i];
-            if (buffer) {
+        for (int w = 0; w < nonempty.size(); ++w) {
+            for (uint64_t bits = nonempty[w]; bits; bits &= bits - 1) {
+                int i = w * 64 + ctz64(bits);
+                MessageBuffer *buffer = in[i];
                 Tick ready_time = buffer->readyTime();
                 if (ready_time < lowest_tick){
                     lowest_tick = ready_time;
@@ -175,6 +181,8 @@ PerfectSwitch::operateVnet(int vnet)
                 }
                 if (ready_time <= current_time) {
                     ready_ports.push_back(i);
+                } else if (buffer->isEmpty()) {
+                    nonempty[w] &= ~(uint64_t(1) << (i % 64));
                 }
             }
         }
@@ -287,8 +295,34 @@ PerfectSwitch::operateMessageBuffer(MessageBuffer *buffer, int vnet)
 }
 
 void
+PerfectSwitch::setupNonEmptyMasks()
+{
+    // Done at the first wakeup, when all in-ports have been added and
+    // the priority groups no longer change.
+    m_in_nonempty.resize(m_in_prio_groups.size());
+    for (int vnet = 0; vnet < m_in_prio_groups.size(); ++vnet) {
+        auto &groups = m_in_prio_groups[vnet];
+        m_in_nonempty[vnet].resize(groups.size());
+        for (int g = 0; g < groups.size(); ++g) {
+            auto &words = m_in_nonempty[vnet][g];
+            words.assign((groups[g].size() + 63) / 64, 0);
+            for (int i = 0; i < groups[g].size(); ++i) {
+                if (groups[g][i]) {
+                    groups[g][i]->setNonEmptyMask(&words[i / 64], i % 64);
+                }
+            }
+        }
+    }
+    m_in_nonempty_ready = true;
+}
+
+void
 PerfectSwitch::wakeup()
 {
+    if (!m_in_nonempty_ready) {
+        setupNonEmptyMasks();
+    }
+
     // Give the highest numbered link priority most of the time
     m_wakeups_wo_switch++;
     int highest_prio_vnet = m_virtual_networks-1;

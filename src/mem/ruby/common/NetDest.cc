@@ -310,8 +310,10 @@ NetDest::resize()
     m_bits.resize(MachineType_base_level(MachineType_NUM));
     assert(m_bits.size() == MachineType_NUM);
 
+    // Same as MachineType_base_count(i), without a call per type.
+    const auto &counts = m_ruby_system->m_num_controllers;
     for (int i = 0; i < m_bits.size(); i++) {
-        m_bits[i].setSize(MachineType_base_count((MachineType)i));
+        m_bits[i].setSize(counts[i]);
     }
 }
 
