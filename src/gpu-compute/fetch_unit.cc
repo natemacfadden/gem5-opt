@@ -68,6 +68,8 @@ FetchUnit::init()
     fetchQueue.clear();
     fetchStatusQueue.resize(computeUnit.shader->n_wf);
     fetchBuf.resize(computeUnit.shader->n_wf, FetchBufDesc());
+    simdId = waveList->at(0)->simdId;
+    bufInUse.assign(computeUnit.shader->n_wf, 0);
 
     for (int i = 0; i < computeUnit.shader->n_wf; ++i) {
         Wavefront *wf = waveList->at(i);
@@ -75,6 +77,7 @@ FetchUnit::init()
         fetchStatusQueue[i] = std::make_pair(wf, false);
         fetchBuf[i].allocateBuf(fetchDepth, computeUnit.cacheLineSize(), wf);
         fetchBuf[i].decoder(&decoder);
+        fetchBuf[i].inUse = &bufInUse[i];
         decoder.setGfxVersion(computeUnit.shader->getGfxVersion());
     }
 
@@ -92,7 +95,18 @@ FetchUnit::exec()
      * can be released. we only check if we can
      * release a buffer
      */
-    for (auto &fetch_buf : fetchBuf) {
+    // A buffer with no reserved or buffered lines (flushed or never used
+    // since allocation) has a full free list and nothing to decode, so both
+    // checks below are false for it; skip it using the dense bufInUse
+    // flags instead of touching each FetchBufDesc (most belong to stopped
+    // waves).
+    const bool skip_idle = fetchDepth > 0;
+    const int n_bufs = fetchBuf.size();
+    for (int j = 0; j < n_bufs; ++j) {
+        if (skip_idle && !bufInUse[j]) {
+            continue;
+        }
+        auto &fetch_buf = fetchBuf[j];
         if (!fetch_buf.hasFreeSpace()) {
             fetch_buf.checkWaveReleaseBuf();
         }
@@ -101,8 +115,15 @@ FetchUnit::exec()
         }
     }
 
-    // re-evaluate waves which are marked as not ready for fetch
-    for (int j = 0; j < computeUnit.shader->n_wf; ++j) {
+    // re-evaluate waves which are marked as not ready for fetch.
+    // Stopped waves can never become ready here (status must be
+    // S_RUNNING or S_WAITCNT), so skip them using the CU's dense
+    // stopped-slot mirror instead of loading each Wavefront's status.
+    const int n_wf = computeUnit.shader->n_wf;
+    for (int j = 0; j < n_wf; ++j) {
+        if (computeUnit.isWfStopped(simdId, j)) {
+            continue;
+        }
         // Following code assumes 64-bit opertaion and all insts are
         // represented by 64-bit pointers to inst objects.
         Wavefront *curWave = fetchStatusQueue[j].first;
@@ -378,6 +399,9 @@ FetchUnit::FetchBufDesc::flushBuf()
     freeList.clear();
     bufferedPCs.clear();
     reservedPCs.clear();
+    if (inUse) {
+        *inUse = 0;
+    }
     readPtr = bufStart;
 
     for (int i = 0; i < fetchDepth; ++i) {
@@ -467,6 +491,9 @@ FetchUnit::FetchBufDesc::reserveBuf(Addr vaddr)
     uint8_t *inst_buf = freeList.front();
     reservedPCs.emplace(vaddr, inst_buf);
     freeList.pop_front();
+    if (inUse) {
+        *inUse = 1;
+    }
 }
 
 void

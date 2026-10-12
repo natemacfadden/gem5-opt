@@ -237,6 +237,12 @@ class FetchUnit
         // wavefront whose IB is serviced by this fetch buffer
         Wavefront *wavefront;
         TheGpuISA::Decoder *_decoder;
+
+      public:
+        // Points at FetchUnit::bufInUse[slot]: set when a line is reserved,
+        // cleared on flush. While clear, reservedPCs and bufferedPCs are
+        // empty and freeList is full.
+        uint8_t *inUse = nullptr;
     };
 
     class SystemHubEvent : public Event
@@ -284,6 +290,10 @@ class FetchUnit
      * well as any lines that may be prefetched.
      */
     int fetchDepth;
+    // SIMD this fetch unit serves (index into ComputeUnit::wfStopped)
+    int simdId = 0;
+    // per-slot "fetch buffer may hold lines" flags, see FetchBufDesc::inUse
+    std::vector<uint8_t> bufInUse;
 };
 
 } // namespace gem5

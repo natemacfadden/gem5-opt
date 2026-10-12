@@ -765,7 +765,7 @@ ComputeUnit::hasDispResources(HSAQueueEntry *task, int &num_wfs_in_wg)
     // and register file availability
     for (int j = 0; j < shader->n_wf; ++j) {
         for (int i = 0; i < numVectorALUs; ++i) {
-            if (wfList[i][j]->getStatus() == Wavefront::S_STOPPED) {
+            if (isWfStopped(i, j)) {
                 ++freeWfSlots;
                 // check if current WF will fit onto current SIMD/VRF
                 // if all WFs have not yet been mapped to the SIMDs
@@ -2345,8 +2345,12 @@ ComputeUnit::isVectorAluIdle(uint32_t simdId) const
 {
     assert(simdId < numVectorALUs);
 
+    // Use the dense stopped-slot mirror (kept in sync with each
+    // Wavefront's status by Wavefront::writeStatus()) to avoid a cache
+    // miss on every Wavefront of this SIMD each cycle.
+    const uint8_t *stopped = &wfStopped[simdId * wfStoppedStride];
     for (int i_wf = 0; i_wf < shader->n_wf; ++i_wf){
-        if (wfList[simdId][i_wf]->getStatus() != Wavefront::S_STOPPED) {
+        if (!stopped[i_wf]) {
             return false;
         }
     }
