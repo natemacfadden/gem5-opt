@@ -355,6 +355,9 @@ AbstractMemory::checkLockedAddrList(PacketPtr pkt)
 static inline void
 tracePacket(System *sys, const char *label, PacketPtr pkt)
 {
+    if (!debug::MemoryAccess) {
+        return;
+    }
     int size = pkt->getSize();
     if (size == 1 || size == 2 || size == 4 || size == 8) {
         ByteOrder byte_order = sys->getGuestByteOrder();

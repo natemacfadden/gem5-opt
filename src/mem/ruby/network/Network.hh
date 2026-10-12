@@ -179,6 +179,21 @@ class Network : public ClockedObject
     };
     std::unordered_multimap<MachineType, AddrMapNode> addrMap;
 
+    // Memo for addressToNodeID, one entry per MachineType. Keys are
+    // addr >> shift, where shift is chosen per MachineType (on first use,
+    // after addrMap is complete) so that no range boundary (other than
+    // MaxAddr) or interleave mask bit of that type's ranges lies below it.
+    // All addresses with the same key therefore map to the same node.
+    struct AddrMemo
+    {
+        bool valid = false;
+        unsigned shift = 63;
+        Addr key = 0;
+        NodeID node = 0;
+    };
+    std::vector<AddrMemo> addrMemo;
+    NodeID addressToNodeIDSlow(Addr addr, MachineType mtype);
+
     // Global NodeID to local node map. If there are not multiple networks in
     // the same RubySystem, this is a one-to-one mapping of global to local.
     std::unordered_map<NodeID, NodeID> globalToLocalMap;

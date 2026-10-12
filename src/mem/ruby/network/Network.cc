@@ -40,6 +40,9 @@
 
 #include "mem/ruby/network/Network.hh"
 
+#include <algorithm>
+
+#include "base/bitfield.hh"
 #include "base/logging.hh"
 #include "mem/ruby/common/MachineID.hh"
 #include "mem/ruby/network/BasicLink.hh"
@@ -235,6 +238,50 @@ Network::setFromNetQueue(NodeID global_id, bool ordered, int network_num,
 
 NodeID
 Network::addressToNodeID(Addr addr, MachineType mtype)
+{
+    if (addrMemo.empty()) {
+        // Per MachineType: only that type's ranges are consulted by
+        // addressToNodeIDSlow. A boundary at MaxAddr (an "everything"
+        // range) does not lower the shift; the single key that contains
+        // MaxAddr bypasses the memo instead.
+        addrMemo.resize(MachineType_NUM + 1);
+        for (auto &memo : addrMemo) {
+            memo.shift = 63;
+        }
+        for (const auto &entry : addrMap) {
+            unsigned &shift = addrMemo[entry.first].shift;
+            auto lim = [&shift](Addr v) {
+                if (v != 0 && v != MaxAddr) {
+                    shift = std::min(shift, (unsigned)ctz64(v));
+                }
+            };
+            for (const AddrRange &range : entry.second.ranges) {
+                lim(range.start());
+                lim(range.end());
+                // Lowest interleave-mask bit
+                if (range.interleaved()) {
+                    lim(range.granularity());
+                }
+            }
+        }
+    }
+    AddrMemo &memo = addrMemo[mtype];
+    Addr key = addr >> memo.shift;
+    if (memo.valid && memo.key == key) {
+        return memo.node;
+    }
+    if (key == (MaxAddr >> memo.shift)) {
+        return addressToNodeIDSlow(addr, mtype);
+    }
+    NodeID node = addressToNodeIDSlow(addr, mtype);
+    memo.valid = true;
+    memo.key = key;
+    memo.node = node;
+    return node;
+}
+
+NodeID
+Network::addressToNodeIDSlow(Addr addr, MachineType mtype)
 {
     // Look through the address maps for entries with matching machine
     // type to get the responsible node for this address.

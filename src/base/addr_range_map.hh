@@ -89,12 +89,34 @@ class AddrRangeMap
     const_iterator
     contains(const AddrRange &r) const
     {
-        return find(r, [r](const AddrRange r1) { return r.isSubset(r1); });
+        return const_cast<AddrRangeMap *>(this)->contains(r);
     }
     iterator
     contains(const AddrRange &r)
     {
-        return find(r, [r](const AddrRange r1) { return r.isSubset(r1); });
+        // Same result as r.isSubset(r1), with the non-interleaved case
+        // (both wrap-around special cases included) inlined; anything
+        // interleaved keeps calling isSubset.
+        if (r.interleaved()) {
+            return find(r,
+                        [&r](const AddrRange &r1) { return r.isSubset(r1); });
+        }
+        const Addr s = r.start();
+        const Addr e = r.end();
+        return find(r, [&r, s, e](const AddrRange &r1) {
+            if (r1.interleaved()) {
+                return r.isSubset(r1);
+            }
+            const Addr rs = r1.start();
+            const Addr re = r1.end();
+            if (e <= s) {
+                return s >= rs && re == 0;
+            }
+            if (re <= rs) {
+                return s >= rs;
+            }
+            return s >= rs && e <= re;
+        });
     }
     /** @} */ // end of api_addr_range
 
@@ -139,12 +161,12 @@ class AddrRangeMap
     const_iterator
     intersects(const AddrRange &r) const
     {
-        return find(r, [r](const AddrRange r1) { return r.intersects(r1); });
+        return find(r, [&r](const AddrRange &r1) { return r.intersects(r1); });
     }
     iterator
     intersects(const AddrRange &r)
     {
-        return find(r, [r](const AddrRange r1) { return r.intersects(r1); });
+        return find(r, [&r](const AddrRange &r1) { return r.intersects(r1); });
     }
     /** @} */ // end of api_addr_range
 
@@ -283,8 +305,9 @@ class AddrRangeMap
      * @param f A condition on an address range
      * @return An iterator that contains the input address range
      */
+    template <typename Cond>
     iterator
-    find(const AddrRange &r, std::function<bool(const AddrRange)> cond)
+    find(const AddrRange &r, Cond &&cond)
     {
         // Check the cache first
         for (auto c = cache.begin(); c != cache.end(); c++) {
@@ -320,8 +343,9 @@ class AddrRangeMap
         return end();
     }
 
+    template <typename Cond>
     const_iterator
-    find(const AddrRange &r, std::function<bool(const AddrRange)> cond) const
+    find(const AddrRange &r, Cond &&cond) const
     {
         return const_cast<AddrRangeMap *>(this)->find(r, cond);
     }
