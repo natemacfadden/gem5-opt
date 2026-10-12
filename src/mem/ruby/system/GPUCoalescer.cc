@@ -729,8 +729,9 @@ GPUCoalescer::makeRequest(PacketPtr pkt)
                 && !m_ruby_system->getCooldownEnabled()) {
             if (!m_usingRubyTester) {
                 num_packets = 0;
+                const GPUDynInstPtr dyn_inst = getDynInst(pkt);
                 for (int i = 0; i < TheGpuISA::NumVecElemPerVecReg; i++) {
-                    num_packets += getDynInst(pkt)->getLaneStatus(i);
+                    num_packets += dyn_inst->getLaneStatus(i);
                 }
             }
         }
