@@ -338,9 +338,10 @@ def enable():
         stats_dict[stat.name] = stat
         stat.enable()
 
-    # New stats
-    _visit_stats(check_stat)
-    _visit_stats(lambda g, s: s.enable())
+    # New stats (walked in C++; same order as _visit_stats)
+    root = Root.getInstance().getCCObject()
+    _m5_stats.checkGroupStats(root)
+    _m5_stats.enableGroupStats(root)
 
     _m5_stats.enable()
 
@@ -353,13 +354,19 @@ def prepare():
     for stat in stats_list:
         stat.prepare()
 
-    # New stats
-    _visit_stats(lambda g, s: s.prepare())
+    # New stats (walked in C++; same order as _visit_stats)
+    _m5_stats.prepareGroupStats(Root.getInstance().getCCObject())
 
 
 def _dump_to_visitor(visitor, roots=None):
     # New stats
     def dump_group(group):
+        if isinstance(visitor, _m5_stats.Output):
+            # Same walk as below, done in C++.
+            if hasattr(group, "getCCObject"):
+                group = group.getCCObject()
+            _m5_stats.dumpGroupStats(visitor, group)
+            return
         for stat in group.getStats():
             stat.visit(visitor)
         for n, g in group.getStatGroups().items():

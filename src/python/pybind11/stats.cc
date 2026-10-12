@@ -41,6 +41,8 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 
+#include "base/cprintf.hh"
+#include "base/logging.hh"
 #include "base/statistics.hh"
 #include "base/stats/text.hh"
 #include "config/have_hdf5.hh"
@@ -85,6 +87,41 @@ cast_stat_info(const statistics::Info *info)
 #undef TRY_CAST
 }
 
+/*
+ * C++ versions of the per-stat walks in m5/stats/__init__.py. They
+ * visit groups and stats in exactly the same order as the Python
+ * helpers (_visit_groups/_visit_stats/_dump_to_visitor) but avoid
+ * creating a Python wrapper and doing a pybind11 dispatch per stat.
+ */
+
+// Same as m5.stats._visit_stats: visits the stats of every group
+// *below* root (not root itself), depth first, in map order.
+template <typename F>
+static void
+visitStatsBelow(const statistics::Group &root, F &&f)
+{
+    for (const auto &kv : root.getStatGroups()) {
+        for (statistics::Info *info : kv.second->getStats()) {
+            f(info);
+        }
+        visitStatsBelow(*kv.second, f);
+    }
+}
+
+// Same as m5.stats._dump_to_visitor.dump_group.
+static void
+dumpGroupStats(statistics::Output &output, const statistics::Group &group)
+{
+    for (statistics::Info *info : group.getStats()) {
+        info->visit(output);
+    }
+    for (const auto &kv : group.getStatGroups()) {
+        output.beginGroup(kv.first.c_str());
+        dumpGroupStats(output, *kv.second);
+        output.endGroup();
+    }
+}
+
 namespace statistics
 {
 
@@ -109,10 +146,9 @@ pybind_init_stats(py::module_ &m_native)
 {
     py::module_ m = m_native.def_submodule("stats");
 
-    m
-        .def("initSimStats", &statistics::initSimStats)
+    m.def("initSimStats", &statistics::initSimStats)
         .def("initText", &statistics::initText,
-            py::return_value_policy::reference)
+             py::return_value_policy::reference)
 #if HAVE_HDF5
         .def("initHDF5", &statistics::initHDF5)
 #endif
@@ -126,7 +162,29 @@ pybind_init_stats(py::module_ &m_native)
         .def("enable", &statistics::enable)
         .def("enabled", &statistics::enabled)
         .def("statsList", &statistics::statsList)
-        ;
+        .def("checkGroupStats",
+             [](const statistics::Group &root) {
+                 visitStatsBelow(root, [](statistics::Info *info) {
+                     if (!info->check() || !info->baseCheck()) {
+                         fatal("statistic '%s' (%d) was not properly "
+                               "initialized by a regStats() function\n",
+                               info->name, info->id);
+                     }
+                     if (!info->flags.isSet(statistics::display))
+                         info->name = csprintf("__Stat%06d", info->id);
+                 });
+             })
+        .def("enableGroupStats",
+             [](const statistics::Group &root) {
+                 visitStatsBelow(
+                     root, [](statistics::Info *info) { info->enable(); });
+             })
+        .def("prepareGroupStats",
+             [](const statistics::Group &root) {
+                 visitStatsBelow(
+                     root, [](statistics::Info *info) { info->prepare(); });
+             })
+        .def("dumpGroupStats", &dumpGroupStats);
 
     py::class_<statistics::Output>(m, "Output")
         .def("begin", &statistics::Output::begin)
