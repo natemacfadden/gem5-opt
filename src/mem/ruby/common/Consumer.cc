@@ -53,17 +53,26 @@ Consumer::Consumer(ClockedObject *_em, Event::Priority ev_prio)
 { }
 
 void
+Consumer::addWakeupTick(Tick when)
+{
+    auto it =
+        std::lower_bound(m_wakeup_ticks.begin(), m_wakeup_ticks.end(), when);
+    if (it == m_wakeup_ticks.end() || *it != when) {
+        m_wakeup_ticks.insert(it, when);
+    }
+}
+
+void
 Consumer::scheduleEvent(Cycles timeDelta)
 {
-    m_wakeup_ticks.insert(em->clockEdge(timeDelta));
+    addWakeupTick(em->clockEdge(timeDelta));
     scheduleNextWakeup();
 }
 
 void
 Consumer::scheduleEventAbsolute(Tick evt_time)
 {
-    m_wakeup_ticks.insert(
-        divCeil(evt_time, em->clockPeriod()) * em->clockPeriod());
+    addWakeupTick(divCeil(evt_time, em->clockPeriod()) * em->clockPeriod());
     scheduleNextWakeup();
 }
 
@@ -71,7 +80,8 @@ void
 Consumer::scheduleNextWakeup()
 {
     // look for the next tick in the future to schedule
-    auto it = m_wakeup_ticks.lower_bound(em->clockEdge());
+    auto it = std::lower_bound(m_wakeup_ticks.begin(), m_wakeup_ticks.end(),
+                               em->clockEdge());
     if (it != m_wakeup_ticks.end()) {
         Tick when = *it;
         assert(when >= em->clockEdge());

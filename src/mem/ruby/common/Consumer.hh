@@ -47,8 +47,10 @@
 #ifndef __MEM_RUBY_COMMON_CONSUMER_HH__
 #define __MEM_RUBY_COMMON_CONSUMER_HH__
 
+#include <algorithm>
 #include <iostream>
 #include <set>
+#include <vector>
 
 #include "sim/clocked_object.hh"
 
@@ -75,7 +77,8 @@ class Consumer
     bool
     alreadyScheduled(Tick time)
     {
-        return m_wakeup_ticks.find(time) != m_wakeup_ticks.end();
+        return std::binary_search(m_wakeup_ticks.begin(), m_wakeup_ticks.end(),
+                                  time);
     }
 
     ClockedObject *
@@ -88,7 +91,10 @@ class Consumer
     void scheduleEvent(Cycles timeDelta);
 
   private:
-    std::set<Tick> m_wakeup_ticks;
+    // Pending wakeup ticks, ascending and unique (a std::set did the same
+    // with a heap node per insert; this list is short).
+    std::vector<Tick> m_wakeup_ticks;
+    void addWakeupTick(Tick when);
     EventFunctionWrapper m_wakeup_event;
     ClockedObject *em;
 

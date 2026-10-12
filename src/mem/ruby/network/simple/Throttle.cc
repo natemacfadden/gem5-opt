@@ -245,8 +245,37 @@ Throttle::operateVnet(int vnet, int channel, int &total_bw_remaining,
 }
 
 void
+Throttle::operateVnetIfPending(int vnet, int &total_bw_remaining,
+                               bool &bw_saturated, bool &output_blocked)
+{
+    if (!(m_pending_vnets >> vnet & 1)) {
+        return;
+    }
+    bool busy = false;
+    for (int channel = 0; channel < getChannelCnt(vnet); ++channel) {
+        operateVnet(vnet, channel, total_bw_remaining, bw_saturated,
+                    output_blocked, m_in[vnet], m_out[vnet]);
+        busy = busy || m_units_remaining[vnet][channel] > 0;
+    }
+    if (!busy && m_in[vnet]->isEmpty()) {
+        m_pending_vnets &= ~(uint64_t(1) << vnet);
+    }
+}
+
+void
 Throttle::wakeup()
 {
+    if (!m_pending_vnets_ready) {
+        // At the first wakeup all links have been added.
+        panic_if(m_vnets > 64, "Throttle: more than 64 vnets");
+        for (int vnet = 0; vnet < m_vnets; ++vnet) {
+            if (m_in[vnet]) {
+                m_in[vnet]->setNonEmptyMask(&m_pending_vnets, vnet);
+            }
+        }
+        m_pending_vnets_ready = true;
+    }
+
     // Limits the number of message sent to a limited number of bytes/cycle.
     assert(getTotalLinkBandwidth() > 0);
     int bw_remaining = getTotalLinkBandwidth();
@@ -267,19 +296,13 @@ Throttle::wakeup()
 
     if (iteration_direction) {
         for (int vnet = 0; vnet < m_vnets; ++vnet) {
-            for (int channel = 0; channel < getChannelCnt(vnet); ++channel) {
-                operateVnet(vnet, channel, bw_remaining,
-                            bw_saturated, output_blocked,
-                            m_in[vnet], m_out[vnet]);
-            }
+            operateVnetIfPending(vnet, bw_remaining, bw_saturated,
+                                 output_blocked);
         }
     } else {
         for (int vnet = m_vnets-1; vnet >= 0; --vnet) {
-            for (int channel = 0; channel < getChannelCnt(vnet); ++channel) {
-                operateVnet(vnet, channel, bw_remaining,
-                            bw_saturated, output_blocked,
-                            m_in[vnet], m_out[vnet]);
-            }
+            operateVnetIfPending(vnet, bw_remaining, bw_saturated,
+                                 output_blocked);
         }
     }
 

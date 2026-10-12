@@ -120,6 +120,13 @@ class Throttle : public Consumer
     std::vector<MessageBuffer*> m_out;
     unsigned int m_vnets;
     std::vector<std::vector<int>> m_units_remaining;
+    // Bit vnet is set while m_in[vnet] may hold messages or a message on
+    // vnet is still being sent (MessageBuffer::setNonEmptyMask); a wakeup
+    // skips the other vnets, for which operateVnet() does nothing.
+    uint64_t m_pending_vnets = 0;
+    bool m_pending_vnets_ready = false;
+    void operateVnetIfPending(int vnet, int &total_bw_remaining,
+                              bool &bw_saturated, bool &output_blocked);
 
     const int m_switch_id;
     Switch *m_switch;

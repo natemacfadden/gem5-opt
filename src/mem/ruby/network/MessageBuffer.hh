@@ -165,6 +165,19 @@ class MessageBuffer : public SimObject
     int getIncomingLink() const { return m_input_link_id; }
     int getVnet() const { return m_vnet_id; }
 
+    // Let the consumer find its non-empty inputs without polling: every
+    // message added to this buffer sets 'bit' in '*mask'. The consumer
+    // clears the bit once it sees the buffer empty.
+    void
+    setNonEmptyMask(uint64_t *mask, int bit)
+    {
+        m_nonempty_mask = mask;
+        m_nonempty_bit = uint64_t(1) << bit;
+        if (!isEmpty()) {
+            *mask |= m_nonempty_bit;
+        }
+    }
+
     Port &
     getPort(const std::string &, PortID idx=InvalidPortID) override
     {
@@ -286,6 +299,16 @@ class MessageBuffer : public SimObject
 
     int m_input_link_id;
     int m_vnet_id;
+
+    uint64_t *m_nonempty_mask = nullptr;
+    uint64_t m_nonempty_bit = 0;
+    void
+    markNonEmpty()
+    {
+        if (m_nonempty_mask) {
+            *m_nonempty_mask |= m_nonempty_bit;
+        }
+    }
 
     // Count the # of times I didn't have N slots available
     statistics::Scalar m_not_avail_count;

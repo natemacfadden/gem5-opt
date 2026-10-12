@@ -286,6 +286,7 @@ MessageBuffer::enqueue(MsgPtr message, Tick current_time, Tick delta,
     // Insert the message into the priority heap
     m_prio_heap.push_back(message);
     push_heap(m_prio_heap.begin(), m_prio_heap.end(), std::greater<MsgPtr>());
+    markNonEmpty();
     // Increment the number of messages statistic
     m_buf_msgs++;
 
@@ -395,6 +396,7 @@ MessageBuffer::reanalyzeList(std::list<MsgPtr> &lt, Tick schdTick)
         m_prio_heap.push_back(m);
         push_heap(m_prio_heap.begin(), m_prio_heap.end(),
                   std::greater<MsgPtr>());
+        markNonEmpty();
 
         m_consumer->scheduleEventAbsolute(schdTick);
 
