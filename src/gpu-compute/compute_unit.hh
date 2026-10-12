@@ -436,6 +436,26 @@ class ComputeUnit : public ClockedObject
     int wfSize() const { return wavefrontSize; }
 
     void exec();
+    /**
+     * Wake-source plumbing for the idle fast path. Every event or call
+     * from outside ComputeUnit::exec() that can change state read by
+     * idleCycleOk() (memory/TLB/LDS/SQC responses and retries, the CU's
+     * own request/response events, fetch returns, register busy/free
+     * marks, wave status writes, waitcnt counter changes, dispatch,
+     * barrier updates, invalidate/flush requests) calls markDirty().
+     * While the flag stays clear after a cycle that took the idle path,
+     * the next cycle is idle too (the idle path changes none of that
+     * state), so exec() reuses the answer without re-evaluating it.
+     * Calls made from inside exec() only matter on the full path, after
+     * which the predicate is evaluated again anyway.
+     * Build with -DCU_DIRTY_CHECK to re-evaluate idleCycleOk() on every
+     * cached cycle and panic on a mismatch (missing wake source).
+     */
+    void
+    markDirty()
+    {
+        idleDirty = true;
+    }
     void initiateFetch(Wavefront *wavefront);
     void fetch(PacketPtr pkt, Wavefront *wavefront);
     void fillKernelState(Wavefront *w, HSAQueueEntry *task);
@@ -1036,6 +1056,9 @@ class ComputeUnit : public ClockedObject
     InstSeqNum globalSeqNum;
     int wavefrontSize;
     uint64_t execCycles;
+    // See markDirty(). idleCached: the last exec() took the idle path.
+    bool idleDirty = true;
+    bool idleCached = false;
 
     /**
      * TODO: Update these comments once the pipe stage interface has

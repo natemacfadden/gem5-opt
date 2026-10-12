@@ -640,6 +640,7 @@ Wavefront::writeStatus(status_e newStatus)
     status = newStatus;
     if (computeUnit) {
         computeUnit->setWfStopped(simdId, wfSlotId, newStatus == S_STOPPED);
+        computeUnit->markDirty(); // wake source
     }
 }
 
@@ -1461,36 +1462,42 @@ void
 Wavefront::incVMemInstsIssued()
 {
     ++vmemInstsIssued;
+    computeUnit->markDirty(); // wake source
 }
 
 void
 Wavefront::incExpInstsIssued()
 {
     ++expInstsIssued;
+    computeUnit->markDirty(); // wake source
 }
 
 void
 Wavefront::incLGKMInstsIssued()
 {
     ++lgkmInstsIssued;
+    computeUnit->markDirty(); // wake source
 }
 
 void
 Wavefront::decVMemInstsIssued()
 {
     --vmemInstsIssued;
+    computeUnit->markDirty(); // wake source
 }
 
 void
 Wavefront::decExpInstsIssued()
 {
     --expInstsIssued;
+    computeUnit->markDirty(); // wake source
 }
 
 void
 Wavefront::decLGKMInstsIssued()
 {
     --lgkmInstsIssued;
+    computeUnit->markDirty(); // wake source
 }
 
 void

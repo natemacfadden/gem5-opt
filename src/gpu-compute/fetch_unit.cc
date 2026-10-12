@@ -328,6 +328,7 @@ FetchUnit::fetch(PacketPtr pkt, Wavefront *wavefront)
 void
 FetchUnit::processFetchReturn(PacketPtr pkt)
 {
+    computeUnit.markDirty(); // wake source
     ComputeUnit::SQCPort::SenderState *sender_state =
         safe_cast<ComputeUnit::SQCPort::SenderState*>(pkt->senderState);
 
@@ -354,6 +355,7 @@ FetchUnit::processFetchReturn(PacketPtr pkt)
 void
 FetchUnit::flushBuf(int wfSlotId)
 {
+    computeUnit.markDirty(); // wake source
     fetchBuf.at(wfSlotId).flushBuf();
 }
 
@@ -784,6 +786,7 @@ FetchUnit::FetchBufDesc::fetchBytesRemaining() const
 void
 FetchUnit::SystemHubEvent::process()
 {
+    fetchUnit->computeUnit.markDirty(); // wake source
     reqPkt->makeResponse();
     fetchUnit->computeUnit.handleSQCReturn(reqPkt);
 }

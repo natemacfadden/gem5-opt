@@ -307,6 +307,7 @@ GlobalMemPipeline::issueRequest(GPUDynInstPtr gpuDynInst)
 void
 GlobalMemPipeline::handleResponse(GPUDynInstPtr gpuDynInst)
 {
+    computeUnit.markDirty(); // wake source
     auto mem_req = gmOrderedRespBuffer.find(gpuDynInst->seqNum());
     // if we are getting a response for this mem request,
     // then it ought to already be in the ordered response

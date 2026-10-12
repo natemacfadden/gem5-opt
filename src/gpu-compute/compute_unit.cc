@@ -456,6 +456,7 @@ void
 ComputeUnit::startWavefront(Wavefront *w, int waveId, LdsChunk *ldsChunk,
                             HSAQueueEntry *task, int bar_id, bool fetchContext)
 {
+    markDirty(); // wake source
     static int _n_wave = 0;
 
     VectorMask init_mask;
@@ -539,6 +540,7 @@ ComputeUnit::startWavefront(Wavefront *w, int waveId, LdsChunk *ldsChunk,
  */
 void
 ComputeUnit::doInvalidate(RequestPtr req, int kernId){
+    markDirty(); // wake source
     GPUDynInstPtr gpuDynInst
         = std::make_shared<GPUDynInst>(this, nullptr,
             new KernelLaunchStaticInst(), getAndIncSeqNum());
@@ -556,6 +558,7 @@ ComputeUnit::doInvalidate(RequestPtr req, int kernId){
  */
 void
 ComputeUnit::doFlush(GPUDynInstPtr gpuDynInst) {
+    markDirty(); // wake source
     injectGlobalMemFence(gpuDynInst, true);
 }
 
@@ -566,6 +569,7 @@ ComputeUnit::doFlush(GPUDynInstPtr gpuDynInst) {
  */
 void
 ComputeUnit::doSQCInvalidate(RequestPtr req, int kernId){
+    markDirty(); // wake source
     GPUDynInstPtr gpuDynInst
         = std::make_shared<GPUDynInst>(this, nullptr,
             new KernelLaunchStaticInst(), getAndIncSeqNum());
@@ -583,6 +587,7 @@ ComputeUnit::doSQCInvalidate(RequestPtr req, int kernId){
 void
 ComputeUnit::resetRegisterPool()
 {
+    markDirty(); // wake source
     for (int i=0; i<numVectorALUs; i++)
     {
         registerManager->vrfPoolMgrs[i]->resetRegion(numVecRegsPerSimd);
@@ -593,6 +598,7 @@ ComputeUnit::resetRegisterPool()
 void
 ComputeUnit::dispWorkgroup(HSAQueueEntry *task, int num_wfs_in_wg)
 {
+    markDirty(); // wake source
     // If we aren't ticking, start it up!
     if (!tickEvent.scheduled()) {
         DPRINTF(GPUDisp, "CU%d: Scheduling wakeup next cycle\n", cu_id);
@@ -834,6 +840,7 @@ ComputeUnit::allAtBarrier(int bar_id)
 void
 ComputeUnit::incNumAtBarrier(int bar_id)
 {
+    markDirty(); // wake source
     auto &wf_barrier = barrierSlot(bar_id);
     wf_barrier.incNumAtBarrier();
 }
@@ -855,6 +862,7 @@ ComputeUnit::maxBarrierCnt(int bar_id)
 void
 ComputeUnit::resetBarrier(int bar_id)
 {
+    markDirty(); // wake source
     auto &wf_barrier = barrierSlot(bar_id);
     wf_barrier.reset();
 }
@@ -862,6 +870,7 @@ ComputeUnit::resetBarrier(int bar_id)
 void
 ComputeUnit::decMaxBarrierCnt(int bar_id)
 {
+    markDirty(); // wake source
     auto &wf_barrier = barrierSlot(bar_id);
     wf_barrier.decMaxBarrierCnt();
 }
@@ -869,6 +878,7 @@ ComputeUnit::decMaxBarrierCnt(int bar_id)
 void
 ComputeUnit::releaseBarrier(int bar_id)
 {
+    markDirty(); // wake source
     auto &wf_barrier = barrierSlot(bar_id);
     wf_barrier.release();
     freeBarrierIds.insert(bar_id);
@@ -877,6 +887,7 @@ ComputeUnit::releaseBarrier(int bar_id)
 void
 ComputeUnit::releaseWFsFromBarrier(int bar_id)
 {
+    markDirty(); // wake source
     for (int i = 0; i < numVectorALUs; ++i) {
         for (int j = 0; j < shader->n_wf; ++j) {
             Wavefront *wf = wfList[i][j];
@@ -910,7 +921,25 @@ ComputeUnit::idleCycleOk()
 void
 ComputeUnit::exec()
 {
-    if (idleCycleOk()) {
+    bool idle = false;
+    if (idleCached && !idleDirty &&
+        !(TRACING_ON && (debug::GPUSched || debug::GPUSync ||
+                         debug::GPUFetch || debug::GPUExec))) {
+        // Nothing woke this CU since the last (idle) cycle.
+        idle = true;
+#ifdef CU_DIRTY_CHECK
+        panic_if(!idleCycleOk(),
+                 "CU%d: cached idle cycle is not idle at "
+                 "tick %llu (missing markDirty() wake source)",
+                 cu_id, curTick());
+#endif
+    } else {
+        idleDirty = false;
+        idle = idleCycleOk();
+    }
+    idleCached = idle;
+
+    if (idle) {
         // RegisterFile::exec() is empty; the memory pipes, fetch and the
         // rest of the schedule stage do nothing in this state.
         execStage.idleCycle();
@@ -1007,12 +1036,14 @@ ComputeUnit::init()
 bool
 ComputeUnit::DataPort::recvTimingResp(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     return handleResponse(pkt);
 }
 
 bool
 ComputeUnit::DataPort::handleResponse(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     // Ruby has completed the memory op. Schedule the mem_resp_event at the
     // appropriate cycle to process the timing memory response
     // This delay represents the pipeline delay
@@ -1133,12 +1164,14 @@ ComputeUnit::DataPort::handleResponse(PacketPtr pkt)
 bool
 ComputeUnit::ScalarDataPort::recvTimingResp(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     return handleResponse(pkt);
 }
 
 bool
 ComputeUnit::ScalarDataPort::handleResponse(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     // From scalar cache invalidate that was issued at kernel start.
     if (pkt->req->isKernel()) {
         delete pkt->senderState;
@@ -1185,6 +1218,7 @@ ComputeUnit::ScalarDataPort::handleResponse(PacketPtr pkt)
 void
 ComputeUnit::ScalarDataPort::recvReqRetry()
 {
+    computeUnit->markDirty(); // wake source
     for (const auto &pkt : retries) {
         if (!sendTimingReq(pkt)) {
             break;
@@ -1197,6 +1231,7 @@ ComputeUnit::ScalarDataPort::recvReqRetry()
 void
 ComputeUnit::DataPort::recvReqRetry()
 {
+    computeUnit->markDirty(); // wake source
     int len = retries.size();
 
     assert(len > 0);
@@ -1224,6 +1259,7 @@ ComputeUnit::DataPort::recvReqRetry()
 bool
 ComputeUnit::SQCPort::recvTimingResp(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     SenderState *sender_state = safe_cast<SenderState*>(pkt->senderState);
     /** Process the response only if there is a wavefront associated with it.
      * Otherwise, it is from SQC invalidate that was issued at kernel start
@@ -1254,12 +1290,14 @@ ComputeUnit::SQCPort::recvTimingResp(PacketPtr pkt)
 void
 ComputeUnit::handleSQCReturn(PacketPtr pkt)
 {
+    markDirty(); // wake source
     fetchStage.processFetchReturn(pkt);
 }
 
 void
 ComputeUnit::SQCPort::recvReqRetry()
 {
+    computeUnit->markDirty(); // wake source
     int len = retries.size();
 
     assert(len > 0);
@@ -1289,6 +1327,7 @@ ComputeUnit::SQCPort::MemReqEvent::description() const
 void
 ComputeUnit::SQCPort::MemReqEvent::process()
 {
+    sqcPort.computeUnit->markDirty(); // wake source
     SenderState *sender_state = safe_cast<SenderState*>(pkt->senderState);
     [[maybe_unused]] ComputeUnit *compute_unit = sqcPort.computeUnit;
 
@@ -1630,6 +1669,7 @@ ComputeUnit::sendInvL2(Addr paddr)
 void
 ComputeUnit::DataPort::processMemRespEvent(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     DataPort::SenderState *sender_state =
         safe_cast<DataPort::SenderState*>(pkt->senderState);
 
@@ -1712,6 +1752,7 @@ ComputeUnit::DataPort::processMemRespEvent(PacketPtr pkt)
 bool
 ComputeUnit::DTLBPort::recvTimingResp(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     Addr line = pkt->req->getPaddr();
 
     DPRINTF(GPUTLB, "CU%d: DTLBPort received %#x->%#x\n", computeUnit->cu_id,
@@ -1919,6 +1960,7 @@ ComputeUnit::DataPort::createMemRespEvent(PacketPtr pkt)
 void
 ComputeUnit::DataPort::processMemReqEvent(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     SenderState *sender_state = safe_cast<SenderState*>(pkt->senderState);
     GPUDynInstPtr gpuDynInst = sender_state->_gpuDynInst;
     [[maybe_unused]] ComputeUnit *compute_unit = computeUnit;
@@ -1956,6 +1998,7 @@ ComputeUnit::ScalarDataPort::MemReqEvent::description() const
 void
 ComputeUnit::ScalarDataPort::MemReqEvent::process()
 {
+    scalarDataPort.computeUnit->markDirty(); // wake source
     SenderState *sender_state = safe_cast<SenderState*>(pkt->senderState);
     GPUDynInstPtr gpuDynInst = sender_state->_gpuDynInst;
     [[maybe_unused]] ComputeUnit *compute_unit = scalarDataPort.computeUnit;
@@ -1989,6 +2032,7 @@ ComputeUnit::ScalarDataPort::MemReqEvent::process()
 void
 ComputeUnit::DTLBPort::recvReqRetry()
 {
+    computeUnit->markDirty(); // wake source
     int len = retries.size();
 
     DPRINTF(GPUTLB, "CU%d: DTLB recvReqRetry - %d pending requests\n",
@@ -2020,6 +2064,7 @@ ComputeUnit::DTLBPort::recvReqRetry()
 bool
 ComputeUnit::ScalarDTLBPort::recvTimingResp(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     assert(pkt->senderState);
 
     GpuTranslationState *translation_state =
@@ -2091,6 +2136,7 @@ ComputeUnit::ScalarDTLBPort::recvTimingResp(PacketPtr pkt)
 bool
 ComputeUnit::ITLBPort::recvTimingResp(PacketPtr pkt)
 {
+    computeUnit->markDirty(); // wake source
     [[maybe_unused]] Addr line = pkt->req->getPaddr();
     DPRINTF(GPUTLB, "CU%d: ITLBPort received %#x->%#x\n",
             computeUnit->cu_id, pkt->req->getVaddr(), line);
@@ -2144,6 +2190,7 @@ ComputeUnit::ITLBPort::recvTimingResp(PacketPtr pkt)
 void
 ComputeUnit::ITLBPort::recvReqRetry()
 {
+    computeUnit->markDirty(); // wake source
 
     int len = retries.size();
     DPRINTF(GPUTLB, "CU%d: ITLB recvReqRetry - %d pending requests\n", len);
@@ -2421,6 +2468,7 @@ ComputeUnit::printProgress()
 bool
 ComputeUnit::LDSPort::recvTimingResp(PacketPtr packet)
 {
+    computeUnit->markDirty(); // wake source
     const ComputeUnit::LDSPort::SenderState *senderState =
         dynamic_cast<ComputeUnit::LDSPort::SenderState *>(packet->senderState);
 
@@ -2485,6 +2533,7 @@ ComputeUnit::LDSPort::sendTimingReq(PacketPtr pkt)
 void
 ComputeUnit::LDSPort::recvReqRetry()
 {
+    computeUnit->markDirty(); // wake source
     auto queueSize = retries.size();
 
     DPRINTF(GPUPort, "CU%d: LDSPort recvReqRetry - %d pending requests\n",

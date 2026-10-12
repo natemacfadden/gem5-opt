@@ -95,6 +95,9 @@ RegisterFile::regBusy(int idx) const
 void
 RegisterFile::markReg(int regIdx, bool value)
 {
+    if (computeUnit) {
+        computeUnit->markDirty(); // wake source
+    }
     DPRINTF(GPURF, "SIMD[%d] markReg(): physReg[%d] = %d\n",
             simdId, regIdx, (int)value);
     busy.at(regIdx) = value;
