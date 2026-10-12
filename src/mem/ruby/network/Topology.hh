@@ -94,12 +94,10 @@ class Topology
     void makeLink(Network *net, SwitchID src, SwitchID dest,
                   std::vector<NetDest>& routing_table_entry);
 
-    // Helper functions based on chapter 29 of Cormen et al.
-    void extend_shortest_path(Matrix &current_dist, Matrix &latencies,
-                              Matrix &inter_switches);
+    // Shortest-path helpers (see ShortestPath.hh)
+    void extend_shortest_path(Matrix &current_dist);
 
-    Matrix shortest_path(const Matrix &weights,
-            Matrix &latencies, Matrix &inter_switches);
+    Matrix shortest_path(const Matrix &weights);
 
     bool link_is_shortest_path_to_node(SwitchID src, SwitchID next,
             SwitchID final, const Matrix &weights, const Matrix &dist,

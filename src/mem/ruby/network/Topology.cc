@@ -31,12 +31,14 @@
 
 #include <cassert>
 
+#include "base/logging.hh"
 #include "base/trace.hh"
 #include "debug/RubyNetwork.hh"
 #include "mem/ruby/common/NetDest.hh"
 #include "mem/ruby/network/BasicLink.hh"
 #include "mem/ruby/network/BasicRouter.hh"
 #include "mem/ruby/network/Network.hh"
+#include "mem/ruby/network/ShortestPath.hh"
 #include "mem/ruby/slicc_interface/AbstractController.hh"
 #include "mem/ruby/system/RubySystem.hh"
 
@@ -130,15 +132,10 @@ Topology::createLinks(Network *net)
 
     // Initialize weight, latency, and inter switched vectors
     int num_switches = max_switch_id+1;
-    Matrix topology_weights(m_vnets,
-            std::vector<std::vector<int>>(num_switches,
-            std::vector<int>(num_switches, INFINITE_LATENCY)));
-    Matrix component_latencies(num_switches,
-            std::vector<std::vector<int>>(num_switches,
-            std::vector<int>(m_vnets, -1)));
-    Matrix component_inter_switches(num_switches,
-            std::vector<std::vector<int>>(num_switches,
-            std::vector<int>(m_vnets, 0)));
+    Matrix topology_weights(
+        m_vnets,
+        std::vector<std::vector<int>>(
+            num_switches, std::vector<int>(num_switches, INFINITE_LATENCY)));
 
     // Set identity weights to zero
     for (int i = 0; i < topology_weights[0].size(); i++) {
@@ -165,7 +162,6 @@ Topology::createLinks(Network *net)
                     fatal_if(vnet_done[v], "Two links connecting same src"
                     " and destination cannot support same vnets");
 
-                    component_latencies[src][dst][v] = link->m_latency;
                     topology_weights[v][src][dst] = link->m_weight;
                     vnet_done[v] = true;
                 }
@@ -179,7 +175,6 @@ Topology::createLinks(Network *net)
                     fatal_if(vnet_done[vnet], "Two links connecting same src"
                     " and destination cannot support same vnets");
 
-                    component_latencies[src][dst][vnet] = link->m_latency;
                     topology_weights[vnet][src][dst] = link->m_weight;
                     vnet_done[vnet] = true;
                 }
@@ -188,8 +183,7 @@ Topology::createLinks(Network *net)
     }
 
     // Walk topology and hookup the links
-    Matrix dist = shortest_path(topology_weights, component_latencies,
-                                component_inter_switches);
+    Matrix dist = shortest_path(topology_weights);
 
     for (int i = 0; i < topology_weights[0].size(); i++) {
         for (int j = 0; j < topology_weights[0][i].size(); j++) {
@@ -335,72 +329,28 @@ Topology::makeLink(Network *net, SwitchID src, SwitchID dest,
     }
 }
 
-// The following all-pairs shortest path algorithm is based on the
-// discussion from Cormen et al., Chapter 26.1.
 void
-Topology::extend_shortest_path(Matrix &current_dist, Matrix &latencies,
-    Matrix &inter_switches)
+Topology::extend_shortest_path(Matrix &current_dist)
 {
-    int nodes = current_dist[0].size();
-
     // We find the shortest path for each vnet for a given pair of
-    // source and destinations. This is done simply by traversing via
-    // all other nodes and finding the minimum distance.
+    // source and destinations. There is a different topology for each
+    // vnet. Only the distances are used (by shortest_path_to_node).
     for (int v = 0; v < m_vnets; v++) {
-        // There is a different topology for each vnet. Here we try to
-        // build a topology by finding the minimum number of intermediate
-        // switches needed to reach the destination
-        bool change = true;
-        while (change) {
-            change = false;
-            for (int i = 0; i < nodes; i++) {
-                for (int j = 0; j < nodes; j++) {
-                    // We follow an iterative process to build the shortest
-                    // path tree:
-                    // 1. Start from the direct connection (if there is one,
-                    // otherwise assume a hypothetical infinite weight link).
-                    // 2. Then we iterate through all other nodes considering
-                    // new potential intermediate switches. If we find any
-                    // lesser weight combination, we set(update) that as the
-                    // new weight between the source and destination.
-                    // 3. Repeat for all pairs of nodes.
-                    // 4. Go to step 1 if there was any new update done in
-                    // Step 2.
-                    int minimum = current_dist[v][i][j];
-                    int previous_minimum = minimum;
-                    int intermediate_switch = -1;
-                    for (int k = 0; k < nodes; k++) {
-                        minimum = std::min(minimum,
-                            current_dist[v][i][k] + current_dist[v][k][j]);
-                        if (previous_minimum != minimum) {
-                            intermediate_switch = k;
-                            inter_switches[i][j][v] =
-                                inter_switches[i][k][v] +
-                                inter_switches[k][j][v] + 1;
-                        }
-                        previous_minimum = minimum;
-                    }
-                    if (current_dist[v][i][j] != minimum) {
-                        change = true;
-                        current_dist[v][i][j] = minimum;
-                        assert(intermediate_switch >= 0);
-                        assert(intermediate_switch < latencies[i].size());
-                        latencies[i][j][v] =
-                            latencies[i][intermediate_switch][v] +
-                            latencies[intermediate_switch][j][v];
-                    }
-                }
-            }
+        if (!dijkstraAllPairs(current_dist[v], INFINITE_LATENCY)) {
+            warn_once("Topology: a link weight is outside [0, %d] or a "
+                      "self-link has a non-zero weight; using the slower "
+                      "all-pairs relaxation for shortest paths.",
+                      INFINITE_LATENCY);
+            relaxAllPairs(current_dist[v]);
         }
     }
 }
 
 Matrix
-Topology::shortest_path(const Matrix &weights, Matrix &latencies,
-                        Matrix &inter_switches)
+Topology::shortest_path(const Matrix &weights)
 {
     Matrix dist = weights;
-    extend_shortest_path(dist, latencies, inter_switches);
+    extend_shortest_path(dist);
     return dist;
 }
 
