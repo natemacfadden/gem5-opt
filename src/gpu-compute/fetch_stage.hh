@@ -58,6 +58,17 @@ class FetchStage
     ~FetchStage();
     void init();
     void exec();
+    // True when exec() would change nothing in any fetch unit.
+    bool
+    idleNoop() const
+    {
+        for (const auto &fu : _fetchUnit) {
+            if (!fu.idleNoop()) {
+                return false;
+            }
+        }
+        return true;
+    }
     void processFetchReturn(PacketPtr pkt);
     void fetch(PacketPtr pkt, Wavefront *wave);
 

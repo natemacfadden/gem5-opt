@@ -68,6 +68,11 @@ class ScheduleStage
     ~ScheduleStage();
     void init();
     void exec();
+    // True when exec() would change nothing but the per-cycle idle stat
+    // counts: no ready waves, empty schLists and an empty dispatch list.
+    bool idleNoop() const;
+    // Exactly the effect of exec() when idleNoop() holds.
+    void idleCycle();
 
     // Stats related variables and methods
     const std::string& name() const { return _name; }

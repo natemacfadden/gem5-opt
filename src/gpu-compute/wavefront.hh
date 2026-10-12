@@ -278,6 +278,8 @@ class Wavefront : public SimObject
     void discardFetch();
 
     bool waitCntsSatisfied();
+    // Same answer as waitCntsSatisfied(), but never clears the waitcnts.
+    bool waitCntsWouldBeSatisfied() const;
     void setWaitCnts(int vm_wait_cnt, int exp_wait_cnt, int lgkm_wait_cnt);
     void clearWaitCnts();
 

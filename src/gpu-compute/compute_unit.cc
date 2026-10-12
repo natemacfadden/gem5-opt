@@ -44,6 +44,7 @@
 #include "debug/GPUPrefetch.hh"
 #include "debug/GPUReg.hh"
 #include "debug/GPURename.hh"
+#include "debug/GPUSched.hh"
 #include "debug/GPUSync.hh"
 #include "debug/GPUTLB.hh"
 #include "debug/GPUTrace.hh"
@@ -888,27 +889,53 @@ ComputeUnit::releaseWFsFromBarrier(int bar_id)
 }
 
 // Execute one clock worth of work on the ComputeUnit.
+bool
+ComputeUnit::idleCycleOk()
+{
+    // Keep DPRINTF output identical too: take the full path when any
+    // flag that the skipped code would print under is on.
+    if (TRACING_ON && (debug::GPUSched || debug::GPUSync || debug::GPUFetch ||
+                       debug::GPUExec)) {
+        return false;
+    }
+    // The stages run in this order inside one exec(); each check below
+    // holds on the state left by the previous exec() (plus whatever events
+    // changed since), and when all hold, no stage changes that state, so
+    // every stage sees exactly the state checked here.
+    return scalarMemoryPipe.idleNoop() && globalMemoryPipe.idleNoop() &&
+           localMemoryPipe.idleNoop() && scheduleStage.idleNoop() &&
+           fetchStage.idleNoop() && scoreboardCheckStage.idleNoop();
+}
+
 void
 ComputeUnit::exec()
 {
-    // process reads and writes in the RFs
-    for (auto &vecRegFile : vrf) {
-        vecRegFile->exec();
-    }
+    if (idleCycleOk()) {
+        // RegisterFile::exec() is empty; the memory pipes, fetch and the
+        // rest of the schedule stage do nothing in this state.
+        execStage.idleCycle();
+        scheduleStage.idleCycle();
+        scoreboardCheckStage.idleCycle();
+    } else {
+        // process reads and writes in the RFs
+        for (auto &vecRegFile : vrf) {
+            vecRegFile->exec();
+        }
 
-    for (auto &scRegFile : srf) {
-        scRegFile->exec();
-    }
+        for (auto &scRegFile : srf) {
+            scRegFile->exec();
+        }
 
-    // Execute pipeline stages in reverse order to simulate
-    // the pipeline latency
-    scalarMemoryPipe.exec();
-    globalMemoryPipe.exec();
-    localMemoryPipe.exec();
-    execStage.exec();
-    scheduleStage.exec();
-    scoreboardCheckStage.exec();
-    fetchStage.exec();
+        // Execute pipeline stages in reverse order to simulate
+        // the pipeline latency
+        scalarMemoryPipe.exec();
+        globalMemoryPipe.exec();
+        localMemoryPipe.exec();
+        execStage.exec();
+        scheduleStage.exec();
+        scoreboardCheckStage.exec();
+        fetchStage.exec();
+    }
 
     stats.totalCycles++;
     execCycles++;

@@ -61,6 +61,13 @@ class ScalarMemPipeline
   public:
     ScalarMemPipeline(const ComputeUnitParams &p, ComputeUnit &cu);
     void exec();
+    // True when exec() would do nothing (all request queues empty).
+    bool
+    idleNoop() const
+    {
+        return issuedRequests.empty() && returnedStores.empty() &&
+               returnedLoads.empty();
+    }
 
     std::queue<GPUDynInstPtr> &getGMReqFIFO() { return issuedRequests; }
     std::queue<GPUDynInstPtr> &getGMStRespFIFO() { return returnedStores; }

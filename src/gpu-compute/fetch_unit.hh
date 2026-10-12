@@ -59,6 +59,8 @@ class FetchUnit
     ~FetchUnit();
     void init();
     void exec();
+    // True when exec() would change nothing (see FetchStage::idleNoop()).
+    bool idleNoop() const;
     void bindWaveList(std::vector<Wavefront*> *list);
     void initiateFetch(Wavefront *wavefront);
     void fetch(PacketPtr pkt, Wavefront *wavefront);
@@ -163,6 +165,18 @@ class FetchUnit
          * beyond any of the currently buffered cache lines.
          */
         void checkWaveReleaseBuf();
+
+        /**
+         * True when checkWaveReleaseBuf() would return through its
+         * no-release cache, i.e. do nothing at all.
+         */
+        bool releaseIsNoop() const;
+
+        /**
+         * True when decodeInsts() would do nothing: no split instruction
+         * to stitch and the wave's IB is already full.
+         */
+        bool decodeIsNoop() const;
 
         void
         decoder(TheGpuISA::Decoder *dec)

@@ -545,6 +545,63 @@ FetchUnit::FetchBufDesc::hasFetchDataToProcess() const
     return fetchBytesRemaining() >= sizeof(TheGpuISA::RawMachInst);
 }
 
+bool
+FetchUnit::FetchBufDesc::releaseIsNoop() const
+{
+    if (TRACING_ON && debug::GPUFetch) {
+        return false;
+    }
+    Addr cur_wave_pc =
+        roundDown(wavefront->pc(), wavefront->computeUnit->cacheLineSize());
+    return cur_wave_pc == noReleasePC && mapVersion == noReleaseVersion;
+}
+
+bool
+FetchUnit::FetchBufDesc::decodeIsNoop() const
+{
+    return !splitDecode() && wavefront->instructionBuffer.size() >= maxIbSize;
+}
+
+bool
+FetchUnit::idleNoop() const
+{
+    if (fetchDepth <= 0 || !fetchQueue.empty()) {
+        return false;
+    }
+    const int n_bufs = fetchBuf.size();
+    for (int j = 0; j < n_bufs; ++j) {
+        if (!bufInUse[j]) {
+            continue;
+        }
+        const auto &fetch_buf = fetchBuf[j];
+        if (!fetch_buf.hasFreeSpace() && !fetch_buf.releaseIsNoop()) {
+            return false;
+        }
+        if (fetch_buf.hasFetchDataToProcess() && !fetch_buf.decodeIsNoop()) {
+            return false;
+        }
+    }
+    // With fetchQueue empty, exec() would push (and fetch) any eligible
+    // wave; there must be none.
+    const int n_wf = computeUnit.shader->n_wf;
+    for (int j = 0; j < n_wf; ++j) {
+        if (computeUnit.isWfStopped(simdId, j)) {
+            continue;
+        }
+        if (fetchStatusQueue[j].second) {
+            return false;
+        }
+        Wavefront *curWave = fetchStatusQueue[j].first;
+        if ((curWave->getStatus() == Wavefront::S_RUNNING ||
+             curWave->getStatus() == Wavefront::S_WAITCNT) &&
+            fetchBuf[j].hasFreeSpace() && !curWave->stopFetch() &&
+            !curWave->pendingFetch) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void
 FetchUnit::FetchBufDesc::checkWaveReleaseBuf()
 {

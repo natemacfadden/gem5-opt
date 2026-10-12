@@ -78,6 +78,9 @@ class ExecStage
     ~ExecStage() { }
     void init();
     void exec();
+    // Exactly the effect of exec() when every dispatch list entry is
+    // EMPTY (see ComputeUnit::idleCycleOk()).
+    void idleCycle();
 
     std::string dispStatusToStr(int j);
     void dumpDispList();

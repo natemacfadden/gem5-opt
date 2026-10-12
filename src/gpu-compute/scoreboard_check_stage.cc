@@ -314,6 +314,66 @@ ScoreboardCheckStage::exec()
     stats.pendStallCycles[NRDY_WF_STOP] += numStopped;
 }
 
+bool
+ScoreboardCheckStage::idleNoop()
+{
+    idleCnt.fill(0);
+    idleWaves.clear();
+    uint64_t numStopped = 0;
+    for (int simdId = 0; simdId < computeUnit.numVectorALUs; ++simdId) {
+        for (int wfSlot = 0; wfSlot < computeUnit.shader->n_wf; ++wfSlot) {
+            if (computeUnit.isWfStopped(simdId, wfSlot)) {
+                ++numStopped;
+                continue;
+            }
+            Wavefront *w = computeUnit.wfList[simdId][wfSlot];
+            // Same order of checks as ready(); give up on any path where
+            // ready() could have a side effect or depend on time.
+            nonrdytype_e st;
+            const Wavefront::status_e s = w->getStatus();
+            if (s == Wavefront::S_WAITCNT) {
+                if (w->waitCntsWouldBeSatisfied()) {
+                    return false;
+                }
+                st = NRDY_WAIT_CNT;
+            } else if (s == Wavefront::S_STALLED_SLEEP) {
+                return false;
+            } else if (s == Wavefront::S_BARRIER) {
+                if (computeUnit.allAtBarrier(w->barrierId())) {
+                    return false;
+                }
+                st = NRDY_BARRIER_WAIT;
+            } else if (s == Wavefront::S_STOPPED ||
+                       s == Wavefront::S_RETURNING ||
+                       s == Wavefront::S_STALLED) {
+                st = NRDY_WF_STOP;
+            } else if (w->instructionBuffer.empty()) {
+                st = NRDY_IB_EMPTY;
+            } else {
+                return false;
+            }
+            ++idleCnt[st];
+            idleWaves.emplace_back(w, st);
+        }
+    }
+    idleCnt[NRDY_WF_STOP] += numStopped;
+    return true;
+}
+
+void
+ScoreboardCheckStage::idleCycle()
+{
+    // exec() with no ready wave: toSchedule.reset() is a no-op (the
+    // schedule stage's idle check saw every ready list empty), and each
+    // wave gets its status string and one stall count.
+    for (const auto &p : idleWaves) {
+        p.first->lastInstRdyStatus = rdyStatusStr(p.second);
+    }
+    for (int i = 0; i < NRDY_CONDITIONS; ++i) {
+        stats.pendStallCycles[i] += idleCnt[i];
+    }
+}
+
 ScoreboardCheckStage::
 ScoreboardCheckStageStats::ScoreboardCheckStageStats(statistics::Group *parent)
     : statistics::Group(parent, "ScoreboardCheckStage"),

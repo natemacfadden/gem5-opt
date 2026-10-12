@@ -81,6 +81,16 @@ class ScoreboardCheckStage
                          ScoreboardCheckToSchedule &to_schedule);
     ~ScoreboardCheckStage();
     void exec();
+    /**
+     * True when exec() would find no ready wave and have no side effect
+     * other than the stall counts and lastInstRdyStatus (every running
+     * wave waits on a waitcnt, a barrier or an empty IB, or is
+     * stopped/returning/stalled). On true, the per-status counts and the
+     * waves' statuses are kept for idleCycle().
+     */
+    bool idleNoop();
+    // Exactly the effect of exec() when idleNoop() just returned true.
+    void idleCycle();
 
     // Stats related variables and methods
     const std::string& name() const { return _name; }
@@ -100,6 +110,10 @@ class ScoreboardCheckStage
     ScoreboardCheckToSchedule &toSchedule;
 
     const std::string _name;
+
+    // Filled by idleNoop() for idleCycle().
+    std::array<uint64_t, NRDY_CONDITIONS> idleCnt;
+    std::vector<std::pair<Wavefront *, nonrdytype_e>> idleWaves;
 
     const char *
     rdyStatusStr(const nonrdytype_e &rdyStatus)

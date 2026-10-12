@@ -62,6 +62,15 @@ class GlobalMemPipeline
     GlobalMemPipeline(const ComputeUnitParams &p, ComputeUnit &cu);
     void init();
     void exec();
+    // True when exec() would do nothing: no issued request waits to be
+    // initiated and the oldest ordered response (if any) is not back yet.
+    bool
+    idleNoop() const
+    {
+        return gmIssuedRequests.empty() &&
+               (gmOrderedRespBuffer.empty() ||
+                !gmOrderedRespBuffer.begin()->second.second);
+    }
 
     /**
      * Find the next ready response to service. In order to ensure

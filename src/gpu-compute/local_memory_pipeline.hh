@@ -59,6 +59,12 @@ class LocalMemPipeline
   public:
     LocalMemPipeline(const ComputeUnitParams &p, ComputeUnit &cu);
     void exec();
+    // True when exec() would do nothing (both request queues empty).
+    bool
+    idleNoop() const
+    {
+        return lmIssuedRequests.empty() && lmReturnedRequests.empty();
+    }
     std::queue<GPUDynInstPtr> &getLMRespFIFO() { return lmReturnedRequests; }
 
     void issueRequest(GPUDynInstPtr gpuDynInst);

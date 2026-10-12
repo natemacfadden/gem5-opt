@@ -801,6 +801,34 @@ ScheduleStage::reserveResources()
     }
 }
 
+bool
+ScheduleStage::idleNoop() const
+{
+    const int n = computeUnit.numExeUnits();
+    for (int j = 0; j < n; ++j) {
+        if (!fromScoreboardCheck.readyWFs(j).empty() || !schList[j].empty() ||
+            toExecute.dispatchStatus(j) != EMPTY || toExecute.readyInst(j)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void
+ScheduleStage::idleCycle()
+{
+    // exec() with empty ready lists, schLists and dispatch list: every
+    // unit counts one rdyListEmpty and one schListToDispListStall, and
+    // nothing else changes (checkMemResources() only refreshes flags that
+    // are read by dispatchReady(), which needs a non-empty schList, after
+    // being recomputed in the same exec()).
+    const int n = computeUnit.numExeUnits();
+    for (int j = 0; j < n; ++j) {
+        ++stats.pendRdyListEmpty[j];
+        ++stats.pendSchListToDispListStalls[j];
+    }
+}
+
 void
 ScheduleStage::deleteFromSch(Wavefront *w)
 {

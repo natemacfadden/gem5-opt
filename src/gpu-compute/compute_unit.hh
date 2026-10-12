@@ -457,6 +457,14 @@ class ComputeUnit : public ClockedObject
     void resetRegisterPool();
 
   private:
+    /**
+     * True when a full exec() of the pipeline stages would change no
+     * state other than the per-cycle idle statistics. Then exec() applies
+     * those statistics directly (idleCycle() of each stage). Purely a
+     * function of the current state, evaluated every cycle.
+     */
+    bool idleCycleOk();
+
     WFBarrier&
     barrierSlot(int bar_id)
     {

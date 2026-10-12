@@ -1311,6 +1311,25 @@ Wavefront::discardFetch()
 }
 
 bool
+Wavefront::waitCntsWouldBeSatisfied() const
+{
+    // Mirrors the checks of waitCntsSatisfied() without its side effect.
+    if (vmWaitCnt == -1 && expWaitCnt == -1 && lgkmWaitCnt == -1) {
+        return false;
+    }
+    if (vmWaitCnt != -1 && vmemInstsIssued > vmWaitCnt) {
+        return false;
+    }
+    if (expWaitCnt != -1 && expInstsIssued > expWaitCnt) {
+        return false;
+    }
+    if (lgkmWaitCnt != -1 && lgkmInstsIssued > lgkmWaitCnt) {
+        return false;
+    }
+    return true;
+}
+
+bool
 Wavefront::waitCntsSatisfied()
 {
     // Both vmWaitCnt && lgkmWaitCnt uninitialized means

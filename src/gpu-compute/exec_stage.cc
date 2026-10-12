@@ -204,6 +204,24 @@ ExecStage::exec()
     collectStatistics(PostExec, 0);
 }
 
+void
+ExecStage::idleCycle()
+{
+    // exec() with all dispatch slots EMPTY: initStatistics(), one
+    // IdleExec per unit, then PostExec with thisTimeInstExecuted false.
+    initStatistics();
+    for (auto &p : stats.pendNoInstrTypeIssued) {
+        ++p;
+    }
+    if (lastTimeInstExecuted) {
+        ++stats.numTransActiveIdle;
+    }
+    idle_dur++;
+    lastTimeInstExecuted = false;
+    ++stats.pendNoIssue;
+    ++stats.pendSpcZero;
+}
+
 ExecStage::ExecStageStats::ExecStageStats(statistics::Group *parent)
     : statistics::Group(parent, "ExecStage"),
       ADD_STAT(numTransActiveIdle,
