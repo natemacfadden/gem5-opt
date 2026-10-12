@@ -58,6 +58,100 @@
 namespace gem5
 {
 
+/**
+ * A wavefront's instruction buffer: a deque of GPUDynInstPtr that also keeps
+ * the number of buffered instructions that stop further fetch (return,
+ * branch or end-of-kernel), so Wavefront::stopFetch() is O(1) instead of a
+ * walk over the buffer (dereferencing every inst and its static inst) for
+ * every wave on every fetch/idle check. Entries are never replaced in
+ * place, so the count is exact: it is updated on every insert and removal.
+ */
+class InstructionBuffer
+{
+  public:
+    using Container = std::deque<GPUDynInstPtr>;
+    using const_iterator = Container::const_iterator;
+
+    bool
+    empty() const
+    {
+        return buf.empty();
+    }
+    std::size_t
+    size() const
+    {
+        return buf.size();
+    }
+    // Callers read (or bind a reference to) the oldest inst; they must not
+    // assign a different inst through it.
+    GPUDynInstPtr &
+    front()
+    {
+        return buf.front();
+    }
+    const GPUDynInstPtr &
+    front() const
+    {
+        return buf.front();
+    }
+    const_iterator
+    begin() const
+    {
+        return buf.cbegin();
+    }
+    const_iterator
+    end() const
+    {
+        return buf.cend();
+    }
+
+    void
+    push_back(const GPUDynInstPtr &ii)
+    {
+        nStopFetch += stopsFetch(ii);
+        buf.push_back(ii);
+    }
+
+    void
+    pop_front()
+    {
+        nStopFetch -= stopsFetch(buf.front());
+        buf.pop_front();
+    }
+
+    void
+    clear()
+    {
+        buf.clear();
+        nStopFetch = 0;
+    }
+
+    const_iterator
+    erase(const_iterator first, const_iterator last)
+    {
+        for (auto it = first; it != last; ++it) {
+            nStopFetch -= stopsFetch(*it);
+        }
+        return buf.erase(first, last);
+    }
+
+    bool
+    anyStopFetch() const
+    {
+        return nStopFetch > 0;
+    }
+
+  private:
+    static int
+    stopsFetch(const GPUDynInstPtr &ii)
+    {
+        return ii->isReturn() || ii->isBranch() || ii->isEndOfKernel();
+    }
+
+    Container buf;
+    int nStopFetch = 0;
+};
+
 class Wavefront : public SimObject
 {
   public:
@@ -109,7 +203,7 @@ class Wavefront : public SimObject
     ComputeUnit *computeUnit;
     int maxIbSize;
 
-    std::deque<GPUDynInstPtr> instructionBuffer;
+    InstructionBuffer instructionBuffer;
 
     bool pendingFetch;
     bool dropFetch;
@@ -266,7 +360,11 @@ class Wavefront : public SimObject
     void exec();
     // called by SCH stage to reserve
     std::vector<int> reserveResources();
-    bool stopFetch();
+    bool
+    stopFetch() const
+    {
+        return instructionBuffer.anyStopFetch();
+    }
 
     Addr pc() const;
     void pc(Addr new_pc);

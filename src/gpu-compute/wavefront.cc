@@ -816,19 +816,6 @@ Wavefront::isOldestInstFlatMem()
     return false;
 }
 
-bool
-Wavefront::stopFetch()
-{
-    for (const auto &ii : instructionBuffer) {
-        if (ii->isReturn() || ii->isBranch() ||
-            ii->isEndOfKernel()) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 void
 Wavefront::freeResources()
 {
