@@ -174,7 +174,7 @@ DataBlock::popAtomicLogEntryFront()
 {
     assert(m_atomicLog.size() > 0);
     auto ret = m_atomicLog.front();
-    m_atomicLog.pop_front();
+    m_atomicLog.erase(m_atomicLog.begin());
     return ret;
 }
 void

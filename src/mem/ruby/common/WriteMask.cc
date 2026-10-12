@@ -56,8 +56,8 @@ WriteMask::print(std::ostream& out) const
 }
 
 void
-WriteMask::performAtomic(uint8_t * p,
-        std::deque<uint8_t*>& log, bool isAtomicNoReturn) const
+WriteMask::performAtomic(uint8_t *p, std::vector<uint8_t *> &log,
+                         bool isAtomicNoReturn) const
 {
     assert(mSize > 0);
     int offset;

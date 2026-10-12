@@ -256,9 +256,8 @@ class WriteMask
      * so that each individual atomic requestor may see the results of their
      * specific atomic operation.
      */
-    void performAtomic(uint8_t * p,
-            std::deque<uint8_t*>& atomicChangeLog,
-            bool isAtomicNoReturn=true) const;
+    void performAtomic(uint8_t *p, std::vector<uint8_t *> &atomicChangeLog,
+                       bool isAtomicNoReturn = true) const;
 
     const AtomicOpVector&
     getAtomicOps() const

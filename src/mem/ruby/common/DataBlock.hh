@@ -47,6 +47,7 @@
 #include <deque>
 #include <iomanip>
 #include <iostream>
+#include <vector>
 
 #include "mem/packet.hh"
 
@@ -119,7 +120,9 @@ class DataBlock
     int m_block_size = 0;
 
     // Tracks block changes when atomic ops are applied
-    std::deque<uint8_t*> m_atomicLog;
+    // A vector, not a deque: an empty std::deque allocates (map + node) on
+    // construction, and DataBlocks are built and copied per message.
+    std::vector<uint8_t *> m_atomicLog;
 };
 
 inline void
