@@ -399,6 +399,7 @@ FetchUnit::FetchBufDesc::flushBuf()
     freeList.clear();
     bufferedPCs.clear();
     reservedPCs.clear();
+    ++mapVersion;
     if (inUse) {
         *inUse = 0;
     }
@@ -490,6 +491,7 @@ FetchUnit::FetchBufDesc::reserveBuf(Addr vaddr)
      */
     uint8_t *inst_buf = freeList.front();
     reservedPCs.emplace(vaddr, inst_buf);
+    ++mapVersion;
     freeList.pop_front();
     if (inUse) {
         *inUse = 1;
@@ -534,6 +536,7 @@ FetchUnit::FetchBufDesc::fetchDone(PacketPtr pkt)
 
     reserved_pc->second = nullptr;
     reservedPCs.erase(reserved_pc);
+    ++mapVersion;
 }
 
 bool
@@ -547,6 +550,13 @@ FetchUnit::FetchBufDesc::checkWaveReleaseBuf()
 {
     Addr cur_wave_pc = roundDown(wavefront->pc(),
                                  wavefront->computeUnit->cacheLineSize());
+    // Same PC line and unchanged maps as a previous call that released
+    // nothing: this call would release nothing either (only DPRINTFs
+    // differ, so keep the full path when GPUFetch tracing is on).
+    if (cur_wave_pc == noReleasePC && mapVersion == noReleaseVersion &&
+        !(TRACING_ON && debug::GPUFetch)) {
+        return;
+    }
     if (reservedPCs.find(cur_wave_pc) != reservedPCs.end()) {
         DPRINTF(GPUFetch, "WF[%d][%d]: Id%d current wave PC(%#x) still "
                 "being fetched.\n", wavefront->simdId, wavefront->wfSlotId,
@@ -555,6 +565,8 @@ FetchUnit::FetchBufDesc::checkWaveReleaseBuf()
         // should be reserved, but not buffered yet
         assert(bufferedPCs.find(cur_wave_pc) == bufferedPCs.end());
 
+        noReleasePC = cur_wave_pc;
+        noReleaseVersion = mapVersion;
         return;
     }
 
@@ -593,9 +605,13 @@ FetchUnit::FetchBufDesc::checkWaveReleaseBuf()
         freeList.emplace_back(oldest_buffered_pc->second);
         oldest_buffered_pc->second = nullptr;
         bufferedPCs.erase(oldest_buffered_pc);
+        ++mapVersion;
         DPRINTF(GPUFetch, "WF[%d][%d]: Id%d has %d lines buffered.\n",
                 wavefront->simdId, wavefront->wfSlotId, wavefront->wfDynId,
                 bufferedLines());
+    } else {
+        noReleasePC = cur_wave_pc;
+        noReleaseVersion = mapVersion;
     }
 }
 

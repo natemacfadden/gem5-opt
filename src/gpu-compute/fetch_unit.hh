@@ -243,6 +243,15 @@ class FetchUnit
         // cleared on flush. While clear, reservedPCs and bufferedPCs are
         // empty and freeList is full.
         uint8_t *inUse = nullptr;
+
+      private:
+        // Bumped on every change to reservedPCs/bufferedPCs. The outcome
+        // of checkWaveReleaseBuf depends only on the wave's PC line and
+        // these two maps, so when a call found nothing to release we
+        // remember (line, version) and skip identical re-checks.
+        uint64_t mapVersion = 0;
+        uint64_t noReleaseVersion = ~(uint64_t)0;
+        Addr noReleasePC = 0;
     };
 
     class SystemHubEvent : public Event
