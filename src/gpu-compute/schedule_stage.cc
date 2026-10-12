@@ -31,6 +31,7 @@
 
 #include "gpu-compute/schedule_stage.hh"
 
+#include <algorithm>
 #include <unordered_set>
 
 #include "base/compiler.hh"
@@ -61,6 +62,7 @@ ScheduleStage::ScheduleStage(const ComputeUnitParams &p, ComputeUnit &cu,
     }
     wavesInSch.clear();
     schList.resize(cu.numExeUnits());
+    exeUnitReservations.resize(cu.numExeUnits(), false);
     for (auto &dq : schList) {
         dq.clear();
     }
@@ -124,7 +126,7 @@ ScheduleStage::exec()
         // If no wave is ready to be scheduled on the execution resource
         // then skip scheduling for this execution resource
         if (!readyListSize) {
-            stats.rdyListEmpty[j]++;
+            ++stats.pendRdyListEmpty[j];
             continue;
         }
         stats.rdyListNotEmpty[j]++;
@@ -167,7 +169,7 @@ ScheduleStage::exec()
         // If no wave is ready to be scheduled on the execution resource
         // then skip scheduling for this execution resource
         if (!readyListSize) {
-            stats.rdyListEmpty[j]++;
+            ++stats.pendRdyListEmpty[j];
             continue;
         }
         stats.rdyListNotEmpty[j]++;
@@ -626,7 +628,7 @@ ScheduleStage::fillDispatchList()
         // current execution resource
         // No wave has been selected for dispatch = not dispatched
         if (selected_iter == schList.at(j).end()) {
-            stats.schListToDispListStalls[j]++;
+            ++stats.pendSchListToDispListStalls[j];
         } else {
             stats.schListToDispList[j]++;
             //erase the dispatched wave
@@ -733,8 +735,8 @@ ScheduleStage::checkRfOperandReadComplete()
 void
 ScheduleStage::reserveResources()
 {
-    std::vector<bool> exeUnitReservations;
-    exeUnitReservations.resize(computeUnit.numExeUnits(), false);
+    // Reused across cycles instead of allocating a vector every cycle.
+    std::fill(exeUnitReservations.begin(), exeUnitReservations.end(), false);
 
     for (int j = 0; j < computeUnit.numExeUnits(); ++j) {
         GPUDynInstPtr &gpu_dyn_inst = toExecute.readyInst(j);
@@ -753,14 +755,17 @@ ScheduleStage::reserveResources()
                 }
                 computeUnit.srf[wf->simdId]->dispatchInstruction(gpu_dyn_inst);
 
-                std::stringstream ss;
-                for (auto id : execUnitIds) {
-                    ss << id << " ";
+                if (debug::GPUSched) {
+                    std::stringstream ss;
+                    for (auto id : execUnitIds) {
+                        ss << id << " ";
+                    }
+                    DPRINTF(GPUSched,
+                            "dispatchList[%d]: SIMD[%d] WV[%d]: "
+                            "%d: %s    Reserving ExeRes[ %s]\n",
+                            j, wf->simdId, wf->wfDynId, gpu_dyn_inst->seqNum(),
+                            gpu_dyn_inst->disassemble(), ss.str());
                 }
-                DPRINTF(GPUSched, "dispatchList[%d]: SIMD[%d] WV[%d]: %d: %s"
-                        "    Reserving ExeRes[ %s]\n",
-                        j, wf->simdId, wf->wfDynId, gpu_dyn_inst->seqNum(),
-                        gpu_dyn_inst->disassemble(), ss.str());
                 // mark the resources as reserved for this cycle
                 for (auto execUnitId : execUnitIds) {
                     panic_if(exeUnitReservations.at(execUnitId),
@@ -824,6 +829,8 @@ ScheduleStage::ScheduleStageStats::ScheduleStageStats(
                "ready")
 {
     rdyListNotEmpty.init(num_exec_units);
+    pendRdyListEmpty.assign(num_exec_units, 0);
+    pendSchListToDispListStalls.assign(num_exec_units, 0);
     rdyListEmpty.init(num_exec_units);
     addToSchListStalls.init(num_exec_units);
     schListToDispList.init(num_exec_units);
@@ -872,6 +879,38 @@ ScheduleStage::ScheduleStageStats::ScheduleStageStats(
     rfAccessStalls.subname(SCH_SRF_RD_ACCESS_NRDY, csprintf("SrfRd"));
     rfAccessStalls.subname(SCH_SRF_WR_ACCESS_NRDY, csprintf("SrfWr"));
     rfAccessStalls.subname(SCH_RF_ACCESS_NRDY, csprintf("Any"));
+}
+
+void
+ScheduleStage::ScheduleStageStats::flushPending()
+{
+    for (int j = 0; j < pendRdyListEmpty.size(); ++j) {
+        if (pendRdyListEmpty[j]) {
+            rdyListEmpty[j] += pendRdyListEmpty[j];
+            pendRdyListEmpty[j] = 0;
+        }
+        if (pendSchListToDispListStalls[j]) {
+            schListToDispListStalls[j] += pendSchListToDispListStalls[j];
+            pendSchListToDispListStalls[j] = 0;
+        }
+    }
+}
+
+void
+ScheduleStage::ScheduleStageStats::preDumpStats()
+{
+    flushPending();
+    statistics::Group::preDumpStats();
+}
+
+void
+ScheduleStage::ScheduleStageStats::resetStats()
+{
+    // Pending counts belong to the interval being reset.
+    std::fill(pendRdyListEmpty.begin(), pendRdyListEmpty.end(), 0);
+    std::fill(pendSchListToDispListStalls.begin(),
+              pendSchListToDispListStalls.end(), 0);
+    statistics::Group::resetStats();
 }
 
 } // namespace gem5

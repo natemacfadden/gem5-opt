@@ -251,11 +251,24 @@ class ComputeUnit : public ClockedObject
     std::vector<WaitClass> scalarALUs;
 
     // Return total number of execution units on this CU
-    int numExeUnits() const;
+    int
+    numExeUnits() const
+    {
+        return numVectorALUs + numScalarALUs + numVectorGlobalMemUnits +
+               numVectorSharedMemUnits + numScalarMemUnits;
+    }
     // index into readyList of the first memory unit
-    int firstMemUnit() const;
+    int
+    firstMemUnit() const
+    {
+        return numVectorALUs + numScalarALUs;
+    }
     // index into readyList of the last memory unit
-    int lastMemUnit() const;
+    int
+    lastMemUnit() const
+    {
+        return numExeUnits() - 1;
+    }
     // index into scalarALUs vector of SALU used by the wavefront
     int mapWaveToScalarAlu(Wavefront *w) const;
     // index into readyList of SALU used by wavefront

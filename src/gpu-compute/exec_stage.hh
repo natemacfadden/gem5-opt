@@ -102,6 +102,16 @@ class ExecStage
     {
         ExecStageStats(statistics::Group *parent);
 
+        // Hot per-cycle idle counts (numCyclesWithNoInstrTypeIssued,
+        // numCyclesWithNoIssue, spc samples of 0) are accumulated here as
+        // plain integers and folded into the stats before every dump; they
+        // are discarded on a stats reset.
+        std::vector<uint64_t> pendNoInstrTypeIssued;
+        uint64_t pendNoIssue = 0;
+        uint64_t pendSpcZero = 0;
+        void preDumpStats() override;
+        void resetStats() override;
+
         // number of transitions from active to idle
         statistics::Scalar numTransActiveIdle;
         // number of idle cycles
@@ -119,6 +129,9 @@ class ExecStage
         // issued no instructions targeting a specific
         // execution resource type
         statistics::Vector numCyclesWithNoInstrTypeIssued;
+
+      private:
+        void flushPending();
     } stats;
 };
 

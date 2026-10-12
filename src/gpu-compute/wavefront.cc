@@ -818,8 +818,7 @@ Wavefront::isOldestInstFlatMem()
 bool
 Wavefront::stopFetch()
 {
-    for (auto it : instructionBuffer) {
-        GPUDynInstPtr ii = it;
+    for (const auto &ii : instructionBuffer) {
         if (ii->isReturn() || ii->isBranch() ||
             ii->isEndOfKernel()) {
             return true;

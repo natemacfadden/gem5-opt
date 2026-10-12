@@ -63,7 +63,7 @@ ScoreboardCheckStage::collectStatistics(nonrdytype_e rdyStatus)
 {
     panic_if(rdyStatus == NRDY_ILLEGAL || rdyStatus >= NRDY_CONDITIONS,
              "Instruction ready status %d is illegal!!!", rdyStatus);
-    stats.stallCycles[rdyStatus]++;
+    ++stats.pendStallCycles[rdyStatus];
 }
 
 // Return true if this wavefront is ready
@@ -311,9 +311,7 @@ ScoreboardCheckStage::exec()
             collectStatistics(rdyStatus);
         }
     }
-    if (numStopped) {
-        stats.stallCycles[NRDY_WF_STOP] += numStopped;
-    }
+    stats.pendStallCycles[NRDY_WF_STOP] += numStopped;
 }
 
 ScoreboardCheckStage::
@@ -322,6 +320,7 @@ ScoreboardCheckStageStats::ScoreboardCheckStageStats(statistics::Group *parent)
       ADD_STAT(stallCycles, "number of cycles wave stalled in SCB")
 {
     stallCycles.init(NRDY_CONDITIONS);
+    pendStallCycles.fill(0);
 
     stallCycles.subname(NRDY_WF_STOP, csprintf("WFStop"));
     stallCycles.subname(NRDY_IB_EMPTY, csprintf("IBEmpty"));
@@ -331,6 +330,32 @@ ScoreboardCheckStageStats::ScoreboardCheckStageStats(statistics::Group *parent)
     stallCycles.subname(NRDY_SGPR_NRDY, csprintf("SgprBusy"));
     stallCycles.subname(NRDY_MATRIX_CORE, csprintf("MatrixCore"));
     stallCycles.subname(INST_RDY, csprintf("InstrReady"));
+}
+
+void
+ScoreboardCheckStage::ScoreboardCheckStageStats::flushPending()
+{
+    for (int i = 0; i < NRDY_CONDITIONS; ++i) {
+        if (pendStallCycles[i]) {
+            stallCycles[i] += pendStallCycles[i];
+            pendStallCycles[i] = 0;
+        }
+    }
+}
+
+void
+ScoreboardCheckStage::ScoreboardCheckStageStats::preDumpStats()
+{
+    flushPending();
+    statistics::Group::preDumpStats();
+}
+
+void
+ScoreboardCheckStage::ScoreboardCheckStageStats::resetStats()
+{
+    // Pending counts belong to the interval being reset.
+    pendStallCycles.fill(0);
+    statistics::Group::resetStats();
 }
 
 } // namespace gem5

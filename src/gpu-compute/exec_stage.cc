@@ -31,6 +31,8 @@
 
 #include "gpu-compute/exec_stage.hh"
 
+#include <algorithm>
+#include <climits>
 #include <sstream>
 
 #include "base/trace.hh"
@@ -66,7 +68,7 @@ ExecStage::collectStatistics(enum STAT_STATUS stage, int unitId) {
     if (stage == IdleExec) {
         // count cycles when no instruction to a specific execution resource
         // is executed
-        stats.numCyclesWithNoInstrTypeIssued[unitId]++;
+        ++stats.pendNoInstrTypeIssued[unitId];
     } else if (stage == BusyExec) {
         // count the number of cycles an instruction to a specific execution
         // resource type was issued
@@ -93,9 +95,13 @@ ExecStage::collectStatistics(enum STAT_STATUS stage, int unitId) {
         if (instrExecuted) {
             stats.numCyclesWithInstrIssued++;
         } else {
-            stats.numCyclesWithNoIssue++;
+            ++stats.pendNoIssue;
         }
-        stats.spc.sample(executionResourcesUsed);
+        if (executionResourcesUsed) {
+            stats.spc.sample(executionResourcesUsed);
+        } else {
+            ++stats.pendSpcZero;
+        }
     }
 }
 
@@ -219,6 +225,7 @@ ExecStage::ExecStageStats::ExecStageStats(statistics::Group *parent)
     idleDur.init(0, 75-1, 5);
     numCyclesWithInstrTypeIssued.init(compute_unit->numExeUnits());
     numCyclesWithNoInstrTypeIssued.init(compute_unit->numExeUnits());
+    pendNoInstrTypeIssued.assign(compute_unit->numExeUnits(), 0);
 
     int c = 0;
     for (int i = 0; i < compute_unit->numVectorALUs; i++,c++) {
@@ -236,6 +243,45 @@ ExecStage::ExecStageStats::ExecStageStats(statistics::Group *parent)
 
     numCyclesWithNoInstrTypeIssued.subname(c, "SharedMemPipe");
     numCyclesWithInstrTypeIssued.subname(c++, "SharedMemPipe");
+}
+
+void
+ExecStage::ExecStageStats::flushPending()
+{
+    for (int j = 0; j < pendNoInstrTypeIssued.size(); ++j) {
+        if (pendNoInstrTypeIssued[j]) {
+            numCyclesWithNoInstrTypeIssued[j] += pendNoInstrTypeIssued[j];
+            pendNoInstrTypeIssued[j] = 0;
+        }
+    }
+    if (pendNoIssue) {
+        numCyclesWithNoIssue += pendNoIssue;
+        pendNoIssue = 0;
+    }
+    // sample(0, n) updates the distribution exactly like n sample(0) calls
+    // (bucket += n, samples += n, sum/squares += 0, min/max with 0).
+    while (pendSpcZero) {
+        const uint64_t n = std::min<uint64_t>(pendSpcZero, INT_MAX);
+        spc.sample(0, (int)n);
+        pendSpcZero -= n;
+    }
+}
+
+void
+ExecStage::ExecStageStats::preDumpStats()
+{
+    flushPending();
+    statistics::Group::preDumpStats();
+}
+
+void
+ExecStage::ExecStageStats::resetStats()
+{
+    // Pending counts belong to the interval being reset.
+    std::fill(pendNoInstrTypeIssued.begin(), pendNoInstrTypeIssued.end(), 0);
+    pendNoIssue = 0;
+    pendSpcZero = 0;
+    statistics::Group::resetStats();
 }
 
 } // namespace gem5

@@ -184,10 +184,22 @@ class ScheduleStage
     // of the SCH stage or CU.
     std::vector<std::deque<std::pair<GPUDynInstPtr, SCH_STATUS>>> schList;
 
+    // Per-exe-unit reservation flags used by reserveResources(), kept
+    // across cycles to avoid a per-cycle allocation.
+    std::vector<bool> exeUnitReservations;
+
   protected:
     struct ScheduleStageStats : public statistics::Group
     {
         ScheduleStageStats(statistics::Group *parent, int num_exec_units);
+
+        // Hot per-cycle idle counts (rdyListEmpty, schListToDispListStalls)
+        // are accumulated here as plain integers and folded into the stats
+        // before every dump; they are discarded on a stats reset.
+        std::vector<uint64_t> pendRdyListEmpty;
+        std::vector<uint64_t> pendSchListToDispListStalls;
+        void preDumpStats() override;
+        void resetStats() override;
 
         // Number of cycles with empty (or not empty) readyList, per execution
         // resource, when the CU is active (not sleeping)
@@ -228,6 +240,9 @@ class ScheduleStage
         // blocks wave in RFREADY state on schList from potentially moving
         // to dispatchList
         statistics::Vector dispNrdyStalls;
+
+      private:
+        void flushPending();
     } stats;
 };
 

@@ -32,6 +32,7 @@
 #ifndef __SCOREBOARD_CHECK_STAGE_HH__
 #define __SCOREBOARD_CHECK_STAGE_HH__
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -125,6 +126,16 @@ class ScoreboardCheckStage
         ScoreboardCheckStageStats(statistics::Group *parent);
 
         statistics::Vector stallCycles;
+
+        // Per-cycle stallCycles increments are accumulated here as plain
+        // integers and folded into stallCycles before every dump; they are
+        // discarded on a stats reset.
+        std::array<uint64_t, NRDY_CONDITIONS> pendStallCycles;
+        void preDumpStats() override;
+        void resetStats() override;
+
+      private:
+        void flushPending();
     } stats;
 };
 
