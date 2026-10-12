@@ -84,6 +84,10 @@ class WeightBased : public BaseRoutingUnit
 
     std::vector<std::unique_ptr<LinkInfo>> m_links;
 
+    // m_first_link[set][bit]: position in m_links of the first link whose
+    // routing entry holds that destination, -1 if none (built lazily).
+    mutable std::vector<std::vector<int>> m_first_link;
+
     Random::RandomPtr rng = Random::genRandom();
 
     void findRoute(const Message &msg,

@@ -98,6 +98,8 @@ class NetDest
     {
         return m_bits[i].isEmpty();
     }
+    // True iff this holds exactly one destination: set index and bit.
+    bool singleElement(int &set, NodeID &bit) const;
 
     // For Princeton Network
     std::vector<NodeID> getAllDest();

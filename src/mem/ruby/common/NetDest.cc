@@ -195,6 +195,26 @@ NetDest::smallestElement(MachineType machine) const
     panic("No smallest element of given MachineType.");
 }
 
+bool
+NetDest::singleElement(int &set, NodeID &bit) const
+{
+    set = -1;
+    for (int i = 0; i < m_bits.size(); i++) {
+        if (m_bits[i].isEmpty()) {
+            continue;
+        }
+        if (set >= 0 || m_bits[i].count() != 1) {
+            return false;
+        }
+        set = i;
+    }
+    if (set < 0) {
+        return false;
+    }
+    bit = m_bits[set].smallestElement();
+    return true;
+}
+
 // Returns true iff all bits are set
 bool
 NetDest::isBroadcast() const

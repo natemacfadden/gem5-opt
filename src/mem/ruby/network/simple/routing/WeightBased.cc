@@ -72,6 +72,7 @@ WeightBased::addOutPort(LinkID link_id,
         }
     }
     sortLinks();
+    m_first_link.clear();
 }
 
 void
@@ -111,8 +112,39 @@ void
 WeightBased::findRoute(const Message &msg,
                        std::vector<RouteInfo> &out_links) const
 {
-    NetDest msg_dsts = msg.getDestination();
     assert(out_links.size() == 0);
+    // Single destination, static link order: the loop below would pick
+    // the first link holding it, with exactly that destination.
+    int set;
+    NodeID bit;
+    if (!params().adaptive_routing &&
+        msg.getDestination().singleElement(set, bit)) {
+        if (m_first_link.empty()) {
+            int nsets = msg.getDestination().getSize();
+            m_first_link.assign(nsets,
+                                std::vector<int>(NUMBER_BITS_PER_SET, -1));
+            for (int p = m_links.size() - 1; p >= 0; p--) {
+                const NetDest &dst = m_links[p]->m_routing_entry;
+                for (int i : m_links[p]->m_nonempty_sets) {
+                    for (NodeID j = 0; j < NUMBER_BITS_PER_SET; j++) {
+                        if (i < nsets &&
+                            dst.isElement(
+                                {MachineType_from_base_level(i), j})) {
+                            m_first_link[i][j] = p;
+                        }
+                    }
+                }
+            }
+        }
+        int p = m_first_link[set][bit];
+        if (p >= 0) {
+            out_links.emplace_back(msg.getDestination(),
+                                   m_links[p]->m_link_id);
+            return;
+        }
+    }
+
+    NetDest msg_dsts = msg.getDestination();
     for (auto &link : m_links) {
         const NetDest &dst = link->m_routing_entry;
         // Same as msg_dsts.intersectionIsNotEmpty(dst), checking only

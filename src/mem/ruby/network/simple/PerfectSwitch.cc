@@ -155,10 +155,16 @@ PerfectSwitch::operateVnet(int vnet)
     if (m_pending_message_count[vnet] == 0)
         return;
 
+    // Ports whose oldest message is not ready by now are skipped below:
+    // operateMessageBuffer would do nothing for them.
+    Tick current_time = m_switch->clockEdge();
+    static thread_local std::vector<int> ready_ports;
+
     for (auto &in : m_in_prio_groups[vnet]) {
         // first check the port with the oldest message
         unsigned start_in_port = 0;
         Tick lowest_tick = MaxTick;
+        ready_ports.clear();
         for (int i = 0; i < in.size(); ++i) {
             MessageBuffer *buffer = in[i];
             if (buffer) {
@@ -167,17 +173,23 @@ PerfectSwitch::operateVnet(int vnet)
                     lowest_tick = ready_time;
                     start_in_port = i;
                 }
+                if (ready_time <= current_time) {
+                    ready_ports.push_back(i);
+                }
             }
         }
         DPRINTF(RubyNetwork, "vnet %d: %d pending msgs. "
                             "Checking port %d first\n",
                 vnet, m_pending_message_count[vnet], start_in_port);
-        // check all ports starting with the one with the oldest message
-        for (int i = 0; i < in.size(); ++i) {
-            int in_port = (i + start_in_port) % in.size();
-            MessageBuffer *buffer = in[in_port];
-            if (buffer)
-                operateMessageBuffer(buffer, vnet);
+        // check the ready ports starting with the one with the oldest
+        // message, in the same cyclic order as all ports
+        auto mid = std::lower_bound(ready_ports.begin(), ready_ports.end(),
+                                    (int)start_in_port);
+        for (auto it = mid; it != ready_ports.end(); ++it) {
+            operateMessageBuffer(in[*it], vnet);
+        }
+        for (auto it = ready_ports.begin(); it != mid; ++it) {
+            operateMessageBuffer(in[*it], vnet);
         }
     }
 }
