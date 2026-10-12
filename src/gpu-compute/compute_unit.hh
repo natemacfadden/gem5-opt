@@ -456,6 +456,8 @@ class ComputeUnit : public ClockedObject
     {
         idleDirty = true;
     }
+    void preDumpStats() override;
+    void resetStats() override;
     void initiateFetch(Wavefront *wavefront);
     void fetch(PacketPtr pkt, Wavefront *wavefront);
     void fillKernelState(Wavefront *w, HSAQueueEntry *task);
@@ -484,6 +486,8 @@ class ComputeUnit : public ClockedObject
      * function of the current state, evaluated every cycle.
      */
     bool idleCycleOk();
+    // Apply the idleRepeat cached idle cycles not yet applied.
+    void flushIdleRepeat();
 
     WFBarrier&
     barrierSlot(int bar_id)
@@ -1059,6 +1063,10 @@ class ComputeUnit : public ClockedObject
     // See markDirty(). idleCached: the last exec() took the idle path.
     bool idleDirty = true;
     bool idleCached = false;
+    // Cached idle cycles whose stage effects (idleCycle() repeated on
+    // unchanged state) are applied by flushIdleRepeat(): before the next
+    // idle check or full cycle, and before stats are dumped or reset.
+    uint64_t idleRepeat = 0;
 
     /**
      * TODO: Update these comments once the pipe stage interface has

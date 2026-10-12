@@ -73,6 +73,8 @@ class ScheduleStage
     bool idleNoop() const;
     // Exactly the effect of exec() when idleNoop() holds.
     void idleCycle();
+    // k more idleCycle() calls.
+    void idleCycles(uint64_t k);
 
     // Stats related variables and methods
     const std::string& name() const { return _name; }

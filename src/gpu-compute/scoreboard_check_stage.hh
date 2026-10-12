@@ -94,6 +94,9 @@ class ScoreboardCheckStage
     bool idleNoop();
     // Exactly the effect of exec() when idleNoop() just returned true.
     void idleCycle();
+    // k more idleCycle() calls right after one, before the next
+    // idleNoop(): the status strings and seqNums are already set.
+    void idleCycles(uint64_t k);
 
     // Stats related variables and methods
     const std::string& name() const { return _name; }

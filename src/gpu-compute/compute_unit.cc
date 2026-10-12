@@ -901,6 +901,33 @@ ComputeUnit::releaseWFsFromBarrier(int bar_id)
     }
 }
 
+void
+ComputeUnit::flushIdleRepeat()
+{
+    if (idleRepeat) {
+        execStage.idleCycles(idleRepeat);
+        scheduleStage.idleCycles(idleRepeat);
+        scoreboardCheckStage.idleCycles(idleRepeat);
+        idleRepeat = 0;
+    }
+}
+
+void
+ComputeUnit::preDumpStats()
+{
+    flushIdleRepeat();
+    ClockedObject::preDumpStats();
+}
+
+void
+ComputeUnit::resetStats()
+{
+    // The pending cycles precede the reset: apply them (idle_dur is not
+    // a stat) before the stage and wavefront stats below this CU reset.
+    flushIdleRepeat();
+    ClockedObject::resetStats();
+}
+
 // Execute one clock worth of work on the ComputeUnit.
 bool
 ComputeUnit::idleCycleOk()
@@ -924,25 +951,31 @@ void
 ComputeUnit::exec()
 {
     bool idle = false;
+    bool cached = false;
     if (idleCached && !idleDirty &&
         !(TRACING_ON &&
           (debug::GPUSched || debug::GPUSync || debug::GPUFetch ||
            debug::GPUExec || debug::GPUVRF || debug::GPUSRF))) {
         // Nothing woke this CU since the last (idle) cycle.
         idle = true;
+        cached = true;
 #ifdef CU_DIRTY_CHECK
+        flushIdleRepeat();
         panic_if(!idleCycleOk(),
                  "CU%d: cached idle cycle is not idle at "
                  "tick %llu (missing markDirty() wake source)",
                  cu_id, curTick());
 #endif
     } else {
+        flushIdleRepeat();
         idleDirty = false;
         idle = idleCycleOk();
     }
     idleCached = idle;
 
-    if (idle) {
+    if (cached) {
+        ++idleRepeat;
+    } else if (idle) {
         // RegisterFile::exec() is empty; the memory pipes, fetch and the
         // rest of the schedule stage do nothing in this state.
         execStage.idleCycle();

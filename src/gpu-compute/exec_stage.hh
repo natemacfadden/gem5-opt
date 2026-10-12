@@ -81,6 +81,8 @@ class ExecStage
     // Exactly the effect of exec() when every dispatch list entry is
     // EMPTY (see ComputeUnit::idleCycleOk()).
     void idleCycle();
+    // k more idleCycle() calls right after one (stats only).
+    void idleCycles(uint64_t k);
 
     std::string dispStatusToStr(int j);
     void dumpDispList();

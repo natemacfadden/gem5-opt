@@ -425,6 +425,22 @@ ScoreboardCheckStage::idleCycle()
     }
 }
 
+void
+ScoreboardCheckStage::idleCycles(uint64_t k)
+{
+    for (const auto &p : idleWaves) {
+        if (p.raw) {
+            p.w->stats.numTimesBlockedDueRAWDependencies += k;
+        }
+        if (p.wax) {
+            p.w->stats.numTimesBlockedDueWAXDependencies += k;
+        }
+    }
+    for (int i = 0; i < NRDY_CONDITIONS; ++i) {
+        stats.pendStallCycles[i] += k * idleCnt[i];
+    }
+}
+
 ScoreboardCheckStage::
 ScoreboardCheckStageStats::ScoreboardCheckStageStats(statistics::Group *parent)
     : statistics::Group(parent, "ScoreboardCheckStage"),

@@ -830,6 +830,16 @@ ScheduleStage::idleCycle()
 }
 
 void
+ScheduleStage::idleCycles(uint64_t k)
+{
+    const int n = computeUnit.numExeUnits();
+    for (int j = 0; j < n; ++j) {
+        stats.pendRdyListEmpty[j] += k;
+        stats.pendSchListToDispListStalls[j] += k;
+    }
+}
+
+void
 ScheduleStage::deleteFromSch(Wavefront *w)
 {
     wavesInSch.erase(w->wfDynId);

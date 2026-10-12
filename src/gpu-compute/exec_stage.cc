@@ -222,6 +222,19 @@ ExecStage::idleCycle()
     ++stats.pendSpcZero;
 }
 
+void
+ExecStage::idleCycles(uint64_t k)
+{
+    // After an idleCycle(), lastTimeInstExecuted is false and the flags
+    // reset by initStatistics() are already clear.
+    for (auto &p : stats.pendNoInstrTypeIssued) {
+        p += k;
+    }
+    idle_dur += k;
+    stats.pendNoIssue += k;
+    stats.pendSpcZero += k;
+}
+
 ExecStage::ExecStageStats::ExecStageStats(statistics::Group *parent)
     : statistics::Group(parent, "ExecStage"),
       ADD_STAT(numTransActiveIdle,
