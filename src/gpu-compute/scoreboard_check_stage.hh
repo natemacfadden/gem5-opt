@@ -100,7 +100,9 @@ class ScoreboardCheckStage
 
     const std::string _name;
 
-    std::string rdyStatusStr(const nonrdytype_e& rdyStatus) {
+    const char *
+    rdyStatusStr(const nonrdytype_e &rdyStatus)
+    {
         switch (rdyStatus) {
             case NRDY_ILLEGAL: return "NRDY_ILLEGAL";
             case NRDY_WF_STOP: return "NRDY_WF_STOP";

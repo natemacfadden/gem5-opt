@@ -326,7 +326,7 @@ class Wavefront : public SimObject
     // Tracking variables for periodic progress
     InstSeqNum lastInstSeqNum;
     std::string lastInstDisasm;
-    std::string lastInstRdyStatus;
+    const char *lastInstRdyStatus = "";
     bool lastVrfStatus, lastSrfStatus;
 
     // For MI355X MFMA instructions using scale the value must be reprogrammed
@@ -342,6 +342,9 @@ class Wavefront : public SimObject
 
     void reserveGmResource(GPUDynInstPtr ii);
     void reserveLmResource(GPUDynInstPtr ii);
+    // Write status and mirror the S_STOPPED state into the CU so the
+    // scoreboard can skip stopped waves without touching the Wavefront.
+    void writeStatus(status_e newStatus);
 
     /**
      * the following are used for waitcnt instructions

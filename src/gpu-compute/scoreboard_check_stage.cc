@@ -278,9 +278,17 @@ ScoreboardCheckStage::exec()
      */
     toSchedule.reset();
 
+    // Stopped wave slots are always NRDY_WF_STOP and ready() has no side
+    // effects for them, so count them here without touching the Wavefront.
+    statistics::Counter numStopped = 0;
+
     // Iterate over all WF slots across all SIMDs.
     for (int simdId = 0; simdId < computeUnit.numVectorALUs; ++simdId) {
         for (int wfSlot = 0; wfSlot < computeUnit.shader->n_wf; ++wfSlot) {
+            if (computeUnit.isWfStopped(simdId, wfSlot)) {
+                ++numStopped;
+                continue;
+            }
             // reset the ready status of each wavefront
             Wavefront *curWave = computeUnit.wfList[simdId][wfSlot];
             nonrdytype_e rdyStatus = NRDY_ILLEGAL;
@@ -302,6 +310,9 @@ ScoreboardCheckStage::exec()
             }
             collectStatistics(rdyStatus);
         }
+    }
+    if (numStopped) {
+        stats.stallCycles[NRDY_WF_STOP] += numStopped;
     }
 }
 

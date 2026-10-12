@@ -290,6 +290,8 @@ ComputeUnit::ComputeUnit(const Params &p)
     idleWfs = p.n_wf * numVectorALUs;
     lastVaddrWF.resize(numVectorALUs);
     wfList.resize(numVectorALUs);
+    wfStoppedStride = p.n_wf;
+    wfStopped.assign(numVectorALUs * p.n_wf, 1);
 
     wfBarrierSlots.resize(p.num_barrier_slots, WFBarrier());
 
@@ -305,6 +307,10 @@ ComputeUnit::ComputeUnit(const Params &p)
 
             wfList[j].push_back(p.wavefronts[j * p.n_wf + i]);
             wfList[j][i]->setParent(this);
+            panic_if(wfList[j][i]->simdId != j || wfList[j][i]->wfSlotId != i,
+                     "Wavefront list order does not match simd/slot ids");
+            setWfStopped(j, i,
+                         wfList[j][i]->getStatus() == Wavefront::S_STOPPED);
 
             for (int k = 0; k < wfSize(); ++k) {
                 lastVaddrWF[j][i][k] = 0;

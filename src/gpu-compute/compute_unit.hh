@@ -291,6 +291,17 @@ class ComputeUnit : public ClockedObject
 
     typedef ComputeUnitParams Params;
     std::vector<std::vector<Wavefront*>> wfList;
+    // Stopped-slot mirror (see wfStopped below).
+    bool
+    isWfStopped(int simd, int slot) const
+    {
+        return wfStopped[simd * wfStoppedStride + slot];
+    }
+    void
+    setWfStopped(int simd, int slot, bool stopped)
+    {
+        wfStopped[simd * wfStoppedStride + slot] = stopped;
+    }
     int cu_id;
 
     // array of vector register files, one per SIMD
@@ -993,6 +1004,11 @@ class ComputeUnit : public ClockedObject
     InstSeqNum getAndIncSeqNum() { return globalSeqNum++; }
 
   private:
+    // Dense mirror of (wfList[simd][slot]->getStatus() == S_STOPPED),
+    // maintained by Wavefront::writeStatus(). Lets the scoreboard skip
+    // stopped wave slots without a cache miss on each Wavefront.
+    std::vector<uint8_t> wfStopped;
+    int wfStoppedStride = 0;
     const int _cacheLineSize;
     const int _numBarrierSlots;
     int cacheLineBits;

@@ -631,7 +631,16 @@ Wavefront::setStatus(status_e newStatus)
             assert(computeUnit->idleWfs >= 0);
         }
     }
+    writeStatus(newStatus);
+}
+
+void
+Wavefront::writeStatus(status_e newStatus)
+{
     status = newStatus;
+    if (computeUnit) {
+        computeUnit->setWfStopped(simdId, wfSlotId, newStatus == S_STOPPED);
+    }
 }
 
 void
@@ -640,7 +649,7 @@ Wavefront::start(uint64_t _wf_dyn_id, Addr init_pc)
     wfDynId = _wf_dyn_id;
     _pc = init_pc;
 
-    status = S_RUNNING;
+    writeStatus(S_RUNNING);
 
     vecReads.resize(maxVgprs, 0);
 }
@@ -1360,7 +1369,7 @@ Wavefront::sleepDone()
     if (sleepCnt != 0)
         return false;
 
-    status = S_RUNNING;
+    writeStatus(S_RUNNING);
     return true;
 }
 
@@ -1427,7 +1436,7 @@ Wavefront::clearWaitCnts()
     lgkmWaitCnt = -1;
 
     // resume running normally
-    status = S_RUNNING;
+    writeStatus(S_RUNNING);
 }
 
 void
@@ -1680,7 +1689,8 @@ Wavefront::printProgress()
     for (auto &elem : lgkmIssued) {
         std::cout << elem << ' ';
     }
-    std::cout << ") last ready status: " << lastInstRdyStatus
+    std::cout << ") last ready status: "
+              << (status == S_STOPPED ? "NRDY_WF_STOP" : lastInstRdyStatus)
               << " status VRF/SRF: " << lastVrfStatus << "/" << lastSrfStatus
               << " wait insts:\n";
 
