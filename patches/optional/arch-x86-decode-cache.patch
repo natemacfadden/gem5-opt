@@ -1,0 +1,244 @@
+From ac92a4e60493c02a5de163a8720a772aa7c841d0 Mon Sep 17 00:00:00 2001
+From: Nate MacFadden <natemacfadden@gmail.com>
+Date: Mon, 12 Oct 2026 17:40:28 -0400
+Subject: [PATCH] arch-x86: bounded per-PC decode cache with full byte compare
+
+Every x86 instruction is byte-decoded and then looked up in the
+ExtMachInst hash map; gem5 no longer keeps the per-page decode cache
+(decodePages) it once had. Add a 4096-entry direct-mapped cache per
+decoder, indexed by the instruction's start PC. An entry hits only
+when the decoder mode (instMap plus the cpl/mode/submode/operand,
+address and stack size fields) matches and every byte the byte-wise
+decoder consumed compares equal to the freshly fetched chunks (masked
+chunk compare). On a mismatch the fetched chunks are replayed through
+the byte-wise decoder. Memory is bounded, unlike decodePages.
+
+A hit skips the byte-wise decoder and decode(emi, addr), and with them
+their trace output, so the cache is bypassed while the Decoder or
+Decode debug flag is tracing (checked per instruction, so
+--debug-start/--debug-end work).
+
+Invariant: the byte-wise decoder's result is a pure function of the
+consumed bytes and those mode fields, so a hit returns exactly the
+StaticInst it would. Self-modifying code and remapped pages fail the
+byte compare and take the normal path.
+
+Memory: about 0.4 MB per x86 decoder (one per hardware thread).
+Tested only with X86AtomicSimpleCPU in a GPUFS MI300X setup; other CPU
+models use the same decoder but were not benchmarked.
+
+Measured (gem5.opt, GEMM n=256 ROI run, median of 3): run wall time
+-5.9%, GEMM-section host time -4.3% when it was developed.
+Leave-one-out on a later series (2 paired runs): GEMM n=512 section
++2.6%/+2.3% without it, GEMV n=2048 +5.3%/+1.0%.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ src/arch/x86/decoder.cc | 71 ++++++++++++++++++++++++++++++++++++++++-
+ src/arch/x86/decoder.hh | 51 ++++++++++++++++++++++++++++-
+ 2 files changed, 120 insertions(+), 2 deletions(-)
+
+diff --git a/src/arch/x86/decoder.cc b/src/arch/x86/decoder.cc
+index ae99254995..56dcb6209e 100644
+--- a/src/arch/x86/decoder.cc
++++ b/src/arch/x86/decoder.cc
+@@ -45,6 +45,7 @@ Decoder::State
+ Decoder::doResetState()
+ {
+     origPC = basePC + offset;
++    firstBasePC = basePC;
+     DPRINTF(Decoder, "Setting origPC to %#x\n", origPC);
+     instBytes.reset();
+     chunkIdx = 0;
+@@ -64,9 +65,53 @@ Decoder::doResetState()
+     emi.modRM = 0;
+     emi.sib = 0;
+ 
++    // A hit skips the byte-wise decoder and decode(emi, addr), and with
++    // them their Decoder/Decode trace output, so bypass the cache while
++    // either flag is tracing.
++    if (debug::Decoder || debug::Decode)
++        return PrefixState;
++
++    DecodeCacheEntry &entry = decodeCache[decodeCacheIndex(origPC)];
++    if (entry.mapTag == instMap && entry.pc == origPC &&
++            entry.modeKey == modeKey && instMap) {
++        cacheEntry = &entry;
++        return FromCacheState;
++    }
++
+     return PrefixState;
+ }
+ 
++Decoder::State
++Decoder::doFromCacheState()
++{
++    const DecodeCacheEntry &entry = *cacheEntry;
++    if ((fetchChunk & entry.masks[chunkIdx]) != entry.chunks[chunkIdx]) {
++        // The bytes differ: replay every chunk fetched so far (they are
++        // all in instBytes.chunks, unmasked) through the byte decoder.
++        DPRINTF(Decoder, "Decode cache miss.\n");
++        chunkIdx = 0;
++        fetchChunk = instBytes.chunks[0];
++        basePC = firstBasePC;
++        offset = origPC - firstBasePC;
++        return PrefixState;
++    } else if (chunkIdx == entry.numChunks - 1) {
++        // Every chunk matched: this is the instruction we decoded before.
++        offset = entry.lastOffset;
++        if (offset == sizeof(MachInst))
++            outOfBytes = true;
++        instDone = true;
++        instBytes.si = entry.si;
++        // Same as the byte-wise path does in decode(emi, addr).
++        instBytes.si->size(basePC + offset - origPC);
++        return ResetState;
++    } else {
++        // Matched so far; the instruction continues in the next chunk.
++        chunkIdx++;
++        outOfBytes = true;
++        return FromCacheState;
++    }
++}
++
+ void
+ Decoder::process()
+ {
+@@ -84,6 +129,12 @@ Decoder::process()
+ 
+     instBytes.chunks.push_back(fetchChunk);
+ 
++    if (state == FromCacheState) {
++        state = doFromCacheState();
++        if (state != PrefixState)
++            return;
++    }
++
+     // While there's still something to do...
+     while (!instDone && !outOfBytes) {
+         uint8_t nextByte = getNextByte();
+@@ -690,7 +741,25 @@ Decoder::decode(PCStateBase &next_pc)
+         start = 0;
+     }
+ 
+-    return decode(emi, origPC);
++    StaticInstPtr new_si = decode(emi, origPC);
++
++    const int num_chunks = instBytes.chunks.size();
++    if (num_chunks <= DecodeCacheEntry::MaxChunks &&
++            (int)instBytes.masks.size() == num_chunks) {
++        DecodeCacheEntry &entry = decodeCache[decodeCacheIndex(origPC)];
++        entry.pc = origPC;
++        entry.modeKey = modeKey;
++        entry.mapTag = instMap;
++        entry.numChunks = num_chunks;
++        entry.lastOffset = instBytes.lastOffset;
++        for (int i = 0; i < num_chunks; i++) {
++            entry.chunks[i] = instBytes.chunks[i];
++            entry.masks[i] = instBytes.masks[i];
++        }
++        entry.si = new_si;
++    }
++
++    return new_si;
+ }
+ 
+ StaticInstPtr
+diff --git a/src/arch/x86/decoder.hh b/src/arch/x86/decoder.hh
+index c781275d15..62ee7a90b1 100644
+--- a/src/arch/x86/decoder.hh
++++ b/src/arch/x86/decoder.hh
+@@ -97,6 +97,50 @@ class Decoder : public InstDecoder
+         }
+     };
+ 
++    // A small, bounded, direct-mapped cache of decoded instructions,
++    // indexed by the PC the instruction started at. An entry only hits if
++    // the decoder is in the same mode (same instMap and mode fields) and
++    // every byte the byte-wise decoder consumed for it compares equal to
++    // the freshly fetched bytes (masked chunk compare). The decode result
++    // is a pure function of those bytes and that mode, so a hit returns
++    // exactly what the byte-wise decoder would; self-modifying code or a
++    // remapped page simply fails the byte compare and falls back.
++    struct DecodeCacheEntry
++    {
++        static constexpr int MaxChunks = 3;
++        Addr pc = 0;
++        uint64_t modeKey = 0;
++        const void *mapTag = nullptr; // nullptr means invalid
++        int numChunks = 0;
++        int lastOffset = 0;
++        MachInst chunks[MaxChunks] = {};
++        MachInst masks[MaxChunks] = {};
++        StaticInstPtr si;
++    };
++    static constexpr int DecodeCacheBits = 12;
++    std::vector<DecodeCacheEntry> decodeCache;
++    DecodeCacheEntry *cacheEntry = nullptr;
++    // Fetch-chunk base of the first chunk of the current instruction.
++    Addr firstBasePC = 0;
++    // Packed decoder mode fields that feed the byte-wise decoder.
++    uint64_t modeKey = 0;
++
++    static size_t
++    decodeCacheIndex(Addr pc)
++    {
++        return (pc ^ (pc >> DecodeCacheBits)) &
++            ((1 << DecodeCacheBits) - 1);
++    }
++
++    void
++    updateModeKey()
++    {
++        modeKey = (uint64_t)cpl | ((uint64_t)mode << 8) |
++            ((uint64_t)submode << 16) | ((uint64_t)altOp << 24) |
++            ((uint64_t)defOp << 32) | ((uint64_t)altAddr << 40) |
++            ((uint64_t)defAddr << 48) | ((uint64_t)stack << 56);
++    }
++
+     // The bytes to be predecoded.
+     MachInst fetchChunk;
+     InstBytes instBytes;
+@@ -217,6 +261,7 @@ class Decoder : public InstDecoder
+ 
+     // Functions to handle each of the states
+     State doResetState();
++    State doFromCacheState();
+     State doPrefixState(uint8_t);
+     State doVex2Of2State(uint8_t);
+     State doVex2Of3State(uint8_t);
+@@ -257,12 +302,14 @@ class Decoder : public InstDecoder
+     void process();
+ 
+   public:
+-    Decoder(const X86DecoderParams &p) : InstDecoder(p, &fetchChunk)
++    Decoder(const X86DecoderParams &p) : InstDecoder(p, &fetchChunk),
++        decodeCache(1 << DecodeCacheBits)
+     {
+         emi.reset();
+         emi.mode.cpl = cpl;
+         emi.mode.mode = mode;
+         emi.mode.submode = submode;
++        updateModeKey();
+     }
+ 
+     void
+@@ -279,6 +326,7 @@ class Decoder : public InstDecoder
+         altAddr = m5Reg.altAddr;
+         defAddr = m5Reg.defAddr;
+         stack = m5Reg.stack;
++        updateModeKey();
+ 
+         InstCacheMap::iterator imIter = instCacheMap.find(m5Reg);
+         if (imIter != instCacheMap.end()) {
+@@ -308,6 +356,7 @@ class Decoder : public InstDecoder
+         altAddr = dec->altAddr;
+         defAddr = dec->defAddr;
+         stack = dec->stack;
++        updateModeKey();
+     }
+ 
+     void
+-- 
+2.43.0
+

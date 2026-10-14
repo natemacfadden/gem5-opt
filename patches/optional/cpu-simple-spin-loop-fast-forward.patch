@@ -1,0 +1,1190 @@
+From 6ea5d1c86a7e85264898befcd73991fb33ed4842 Mon Sep 17 00:00:00 2001
+From: Nate MacFadden <natemacfadden@gmail.com>
+Date: Mon, 12 Oct 2026 17:39:53 -0400
+Subject: [PATCH] cpu-simple: experimental exact fast-forward of guest spin
+ loops
+
+A guest thread that polls memory for a GPU completion signal spends
+most of a GPU kernel's simulated time in a tight loop that re-reads
+unchanged memory. On an AtomicSimpleCPU every iteration is simulated
+in full.
+
+With the new, experimental BaseAtomicSimpleCPU parameter
+spin_fast_forward (default False; a warning is printed when it is
+set), the CPU detects a loop iteration that repeats exactly: the same
+fetch/load/store stream with the same data, the same integer,
+floating-point, condition-code and misc registers at the loop head,
+no locked, uncacheable, LL/SC or AMO access, no serializing or
+non-speculative instruction (rdtsc, cpuid, m5 ops), no fault or
+stall, no pending interrupt and an empty instruction-count event
+queue. After two such iterations it measures what one iteration adds
+to every stat, stops its tick event at the loop head and waits.
+
+Anything that could change what the loop observes ends the skip
+first: a write by another agent to any cache line the loop fetches,
+reads or writes (AbstractMemory::access()/functionalAccess() and DMA
+backdoor writes), an x86 interrupt request, a stats dump or reset, a
+drain, a read of the instruction or op count (scheduleInstStop(),
+totalInsts(), progress events), a simulation-loop exit and a Python
+event. At wake tick T it credits k whole iterations (k times the
+measured deltas of every CPU, TLB, crossbar and DRAM stat, plus the
+instruction and op counters), replays the leftover slots, at least
+one whole iteration, at their own ticks and reschedules the tick
+event at the next slot tick.
+
+No skip starts where skipped iterations would leave state behind that
+cannot be credited: with a classic cache, a SimpleMemory with
+latency_var, a probe listener on the CPU (SimPoint, LoopPoint, PMU),
+a progress interval, a branch predictor, an enabled debug flag, or
+another CPU switched in. A loop whose iteration changes a stat that
+cannot be credited (for example a coherent crossbar's snoop fanout
+Distribution) is remembered and not measured again. A stats reset
+during a skip or a measurement ends the skip or restarts the
+measurement, so no pre-reset work lands in the new section.
+
+The detector's state is process-global, so the parameter may be set on
+only one CPU, which must be a single-threaded X86 CPU; anything else is
+fatal(). It is validated only for single-CPU X86 AtomicSimpleCPU runs,
+and not tested on no-ISA (NULL) builds. Known difference: checkpoints
+taken after a skip hold smaller x86 TLB LRU sequence numbers (same
+relative order, so a restored run behaves the same).
+
+Invariant: credited deltas equal what the skipped iterations would
+have produced, and every event that can change the loop's inputs, or
+read its outputs, ends the skip before it takes effect, so all stats
+and the simulated timeline are identical to running the loop.
+
+Measured (gem5.opt, enabled vs. not): GEMM n=512 GEMM-section host
+time -6.7% and GEMV n=2048 -11.2% (2 paired runs each); GEMM n=128
+-33% (one run each).
+The refusals and extra wake sources cost under 1% on these runs
+(GEMM n=512 -0.1%, GEMV n=2048 -0.9%, 2 interleaved pairs each).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ src/arch/x86/interrupts.cc            |   3 +
+ src/arch/x86/isa.cc                   |   9 +
+ src/cpu/base.cc                       |   5 +
+ src/cpu/simple/BaseAtomicSimpleCPU.py |   9 +
+ src/cpu/simple/atomic.cc              | 698 +++++++++++++++++++++++++-
+ src/cpu/simple/atomic.hh              |   1 +
+ src/cpu/simple/base.cc                |   4 +
+ src/cpu/simple/spin_ff.hh             |  84 ++++
+ src/dev/dma_device.cc                 |   6 +-
+ src/mem/abstract_mem.cc               |   5 +
+ src/python/pybind11/event.cc          |   3 +
+ src/sim/sim_events.cc                 |   4 +
+ 12 files changed, 828 insertions(+), 3 deletions(-)
+ create mode 100644 src/cpu/simple/spin_ff.hh
+
+diff --git a/src/arch/x86/interrupts.cc b/src/arch/x86/interrupts.cc
+index bfea600535..e64d6276b4 100644
+--- a/src/arch/x86/interrupts.cc
++++ b/src/arch/x86/interrupts.cc
+@@ -56,6 +56,7 @@
+ #include "arch/x86/regs/apic.hh"
+ #include "arch/x86/regs/misc.hh"
+ #include "cpu/base.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "debug/LocalApic.hh"
+ #include "dev/x86/i82094aa.hh"
+ #include "dev/x86/pc.hh"
+@@ -228,6 +229,8 @@ void
+ X86ISA::Interrupts::requestInterrupt(uint8_t vector,
+         uint8_t deliveryMode, bool level)
+ {
++    if (spin_ff::watching)
++        spin_ff::wake();
+     /*
+      * Fixed and lowest-priority delivery mode interrupts are handled
+      * using the IRR/ISR registers, checking against the TPR, etc.
+diff --git a/src/arch/x86/isa.cc b/src/arch/x86/isa.cc
+index 65618dc857..3fe9b16460 100644
+--- a/src/arch/x86/isa.cc
++++ b/src/arch/x86/isa.cc
+@@ -36,6 +36,7 @@
+ #include "arch/x86/regs/misc.hh"
+ #include "base/compiler.hh"
+ #include "cpu/base.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "cpu/thread_context.hh"
+ #include "debug/MatRegs.hh"
+ #include "debug/X86.hh"
+@@ -180,6 +181,14 @@ ISA::ISA(const X86ISAParams &p)
+     _regClasses.push_back(&ccRegClass);
+     _regClasses.push_back(&miscRegClass);
+ 
++    // x87 TOP, status and tag words, MXCSR, ... are misc regs: a spin
++    // loop that changes only them is not a repeat.
++    spin_ff::snapMisc = [](ThreadContext *tc, std::vector<RegVal> &v) {
++        for (int i = 0; i < misc_reg::NumRegs; i++)
++            if (misc_reg::isValid(i))
++                v.push_back(tc->readMiscRegNoEffect(i));
++    };
++
+     clear();
+ }
+ 
+diff --git a/src/cpu/base.cc b/src/cpu/base.cc
+index 944ae814cf..f124911a18 100644
+--- a/src/cpu/base.cc
++++ b/src/cpu/base.cc
+@@ -56,6 +56,7 @@
+ #include "base/output.hh"
+ #include "base/trace.hh"
+ #include "cpu/checker/cpu.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "cpu/thread_context.hh"
+ #include "debug/Mwait.hh"
+ #include "debug/SyscallVerbose.hh"
+@@ -782,6 +783,10 @@ BaseCPU::scheduleInstStop(ThreadID tid, Counter insts, std::string cause)
+ Tick
+ BaseCPU::getCurrentInstCount(ThreadID tid)
+ {
++    // Instructions of a skipped spin loop are counted when the skip ends;
++    // end it first so the count, and events scheduled from it, are exact.
++    if (spin_ff::watching)
++        spin_ff::wake(true);
+     return threadContexts[tid]->getCurrentInstCount();
+ }
+ 
+diff --git a/src/cpu/simple/BaseAtomicSimpleCPU.py b/src/cpu/simple/BaseAtomicSimpleCPU.py
+index 27367bd0cf..0a8a476ae9 100644
+--- a/src/cpu/simple/BaseAtomicSimpleCPU.py
++++ b/src/cpu/simple/BaseAtomicSimpleCPU.py
+@@ -61,6 +61,15 @@ class BaseAtomicSimpleCPU(BaseSimpleCPU):
+     width = Param.Int(1, "CPU width")
+     simulate_data_stalls = Param.Bool(False, "Simulate dcache stall cycles")
+     simulate_inst_stalls = Param.Bool(False, "Simulate icache stall cycles")
++    spin_fast_forward = Param.Bool(
++        False,
++        "Experimental: fast-forward guest loops that only re-read "
++        "unchanged memory, meant to give the same results as without it. "
++        "Validated only for single-CPU X86 AtomicSimpleCPU runs; at most "
++        "one CPU may set it. Skips are refused with classic caches, a "
++        "SimpleMemory latency_var, probe listeners, progress events, a "
++        "branch predictor or enabled debug flags.",
++    )
+ 
+     def addSimPointProbe(self, interval):
+         simpoint = SimPoint()
+diff --git a/src/cpu/simple/atomic.cc b/src/cpu/simple/atomic.cc
+index 42c555fe11..50b79997c8 100644
+--- a/src/cpu/simple/atomic.cc
++++ b/src/cpu/simple/atomic.cc
+@@ -56,6 +56,609 @@
+ #include "sim/full_system.hh"
+ #include "sim/system.hh"
+ 
++// ---- SPIN_FF: exact fast-forward of pure guest spin loops.
++// A loop iteration that repeats exactly (same slot/fetch/load/store stream
++// with the same data, same int/fp/cc registers at the head, no stall) is
++// measured once: what it adds to every CPU stat (head to head) and to every
++// other stat (per CPU slot, so other components' work is excluded). Then the
++// CPU tick event stops at the loop head. When a wake hook fires at tick T
++// (a write to a line the loop touches, an interrupt, a stats dump/reset or
++// a drain) it credits k whole iterations, replays the leftover slots at
++// their own ticks and reschedules the tick event at the next slot tick.
++// Off unless the CPU sets spin_fast_forward (one X86 CPU, one thread).
++#include <cstring>
++#include <functional>
++#include <map>
++#include <set>
++#include <string>
++
++#include "base/debug.hh"
++#include "base/statistics.hh"
++#include "base/stats/group.hh"
++#include "cpu/simple/spin_ff.hh"
++#include "mem/cache/base.hh"
++#include "mem/simple_mem.hh"
++#include "params/SimpleMemory.hh"
++#include "sim/root.hh"
++
++namespace gem5
++{
++namespace spin_ff
++{
++
++bool replaying = false;
++
++struct Hooks
++{
++    std::function<void(uint64_t, const std::vector<double> &)> credit;
++    std::function<void()> tickOnce;     // one slot, no reschedule
++    std::function<void(Tick)> resume;   // schedule the tick event
++    std::function<bool()> observed;     // per-instruction observers
++    statistics::Group *cpuGroup = nullptr;
++};
++Hooks hooks;
++
++struct Ctx
++{
++    ThreadContext *tc;
++    std::vector<double> cnt;  // numInst, numOp, numLoad, instCnt
++    bool intrPending;
++    bool instQEmpty;
++    Tick period;
++};
++
++namespace
++{
++
++using statistics::Info;
++using Vals = std::vector<double>;
++using Snap = std::vector<Vals>;
++
++struct Rec
++{
++    uint64_t k, a, b, c;  // k: 0 slot, 1 read, 2 write, 3 fetch
++    bool operator==(const Rec &o) const
++    { return k == o.k && a == o.a && b == o.b && c == o.c; }
++};
++
++/** Data as an exact value for <= 8 bytes, else a 64-bit FNV-1a. */
++uint64_t
++dataKey(const uint8_t *d, unsigned n)
++{
++    uint64_t h = 0;
++    if (d && n <= 8) {
++        std::memcpy(&h, d, n);
++        return h;
++    }
++    h = 1469598103934665603ULL;
++    for (unsigned i = 0; d && i < n; i++) { h ^= d[i]; h *= 1099511628211ULL; }
++    return h;
++}
++
++void
++pushDist(const statistics::DistData &d, Vals &out)
++{
++    out.push_back(d.samples); out.push_back(d.sum); out.push_back(d.squares);
++    out.push_back(d.min_val); out.push_back(d.max_val);
++    out.push_back(d.underflow); out.push_back(d.overflow);
++    out.insert(out.end(), d.cvec.begin(), d.cvec.end());
++}
++
++void
++readInfo(Info *i, Vals &out)
++{
++    using namespace statistics;
++    out.clear();
++    if (dynamic_cast<FormulaInfo *>(i))
++        return;
++    i->prepare();
++    if (auto *s = dynamic_cast<ScalarInfo *>(i)) {
++        out.push_back(s->value());
++    } else if (auto *v = dynamic_cast<VectorInfo *>(i)) {
++        const VCounter &c = v->value();
++        out.assign(c.begin(), c.end());
++    } else if (auto *v2 = dynamic_cast<Vector2dInfo *>(i)) {
++        out.assign(v2->cvec.begin(), v2->cvec.end());
++    } else if (auto *d = dynamic_cast<DistInfo *>(i)) {
++        pushDist(d->data, out);
++    } else if (auto *vd = dynamic_cast<VectorDistInfo *>(i)) {
++        for (auto &dd : vd->data)
++            pushDist(dd, out);
++    } else if (auto *sh = dynamic_cast<SparseHistInfo *>(i)) {
++        out.push_back(sh->data.samples);
++        for (auto &[k, n] : sh->data.cmap) {
++            out.push_back(k);
++            out.push_back(n);
++        }
++    }
++}
++
++std::vector<Info *> infos;
++std::vector<bool> isHost;   // host* stats are never compared
++std::vector<size_t> cpuIdx, otherIdx;
++// Some objects keep state that a skip can neither credit nor watch, so no
++// skip starts if one exists: a classic cache (per-block reference counts
++// and replacement data; a store by another CPU that stays in its own
++// cache) and a memory with a random latency (its RNG draws per access).
++bool noSkip = false;
++// Other CPUs. Ending a skip reschedules this CPU's tick event, which can
++// change its order against another CPU's tick in the same tick, and with
++// it which of the two sees the other's store first.
++std::vector<BaseCPU *> otherCpus;
++
++void
++collect(statistics::Group *g, const std::string &path)
++{
++    if (dynamic_cast<BaseCache *>(g))
++        noSkip = true;
++    if (auto *m = dynamic_cast<memory::SimpleMemory *>(g); m &&
++        static_cast<const SimpleMemoryParams &>(m->params()).latency_var)
++        noSkip = true;
++    if (auto *cpu = dynamic_cast<BaseCPU *>(g); cpu && g != hooks.cpuGroup)
++        otherCpus.push_back(cpu);
++    for (auto *i : g->getStats()) {
++        infos.push_back(i);
++        isHost.push_back((path + "." + i->name).find("host") !=
++            std::string::npos);
++    }
++    for (auto &[n, sg] : g->getStatGroups())
++        collect(sg, path.empty() ? n : path + "." + n);
++}
++
++void
++snap(const std::vector<size_t> &idx, Snap &s)
++{
++    s.resize(idx.size());
++    for (size_t n = 0; n < idx.size(); n++)
++        readInfo(infos[idx[n]], s[n]);
++}
++
++constexpr size_t MaxRec = 16384;
++
++struct Cand
++{
++    Addr head = 0;
++    bool active = false, started = false, impure = false, prevOk = false;
++    std::vector<Rec> cur, prev;
++    std::vector<RegVal> startRegs, startMisc;
++    Tick start = 0, prevLen = 0;
++    uint64_t slots = 0, prevSlots = 0, streak = 0, fails = 0, idle = 0;
++};
++Cand c;
++std::set<Addr> goodHeads;   // heads that have reached a 2-iteration streak
++// Heads whose loop can never be skipped (a stat that cannot be credited
++// changes per iteration, or an iteration takes more ticks than slots).
++// They are not measured again: measuring snapshots stats every slot.
++std::set<Addr> badHeads;
++
++bool inited = false, measuring = false, slotFull = false;
++std::vector<size_t> memIdx;
++std::set<size_t> memIdxSet;
++Snap preMem, postMem, cpuA, cpuB;
++std::map<size_t, Vals> accMem, calMem;
++Vals cntA, dCnt;
++std::set<Addr> lines;
++bool skipping = false;
++Tick skipH0 = 0, skipP = 0;
++uint64_t skipL = 0;
++std::vector<std::pair<size_t, Vals>> dCpu;
++std::vector<uint8_t> sig;   // per slot of the measured iteration: access kinds
++std::set<uint8_t> sigDone;
++
++std::vector<RegVal>
++snapRegs(ThreadContext *tc)
++{
++    std::vector<RegVal> v;
++    const auto &rc = tc->getIsaPtr()->regClasses();
++    for (auto cls : {IntRegClass, FloatRegClass, CCRegClass})
++        for (auto &id : *rc.at(cls))
++            v.push_back(tc->getReg(id));
++    return v;
++}
++
++/** Is any debug flag enabled? A skipped iteration prints nothing, so a
++ *  skip would change the trace. Enabled rather than tracing: tracing can
++ *  turn on later (--debug-start) without ending a running skip. */
++bool
++debugFlagsOn()
++{
++    struct F : debug::SimpleFlag
++    {
++        static bool on(debug::SimpleFlag *f)
++        { return static_cast<F *>(f)->_enabled; }
++    };
++    for (const auto &[name, f] : debug::allFlags()) {
++        auto *s = dynamic_cast<debug::SimpleFlag *>(f);
++        if (s && !s->isFormat() && F::on(s))
++            return true;
++    }
++    return false;
++}
++
++template <class S, class P>
++S &
++statOf(P *p)
++{
++    struct A : P
++    {
++        static S &get(P *q) { return static_cast<A *>(q)->s; }
++    };
++    return A::get(p);
++}
++
++/** Scalar/Vector/Vector2d are credited; Value functors ('f') are derived. */
++bool
++creditable(Info *i)
++{
++    using namespace statistics;
++    return !dynamic_cast<FormulaInfo *>(i) &&
++        (dynamic_cast<ScalarInfoProxy<statistics::Scalar> *>(i) ||
++         dynamic_cast<VectorInfoProxy<statistics::Vector> *>(i) ||
++         dynamic_cast<Vector2dInfoProxy<statistics::Vector2d> *>(i) ||
++         dynamic_cast<ScalarInfo *>(i));
++}
++
++void
++creditStat(size_t idx, const Vals &d, double k)
++{
++    using namespace statistics;
++    Info *i = infos[idx];
++    if (auto *p = dynamic_cast<ScalarInfoProxy<statistics::Scalar> *>(i)) {
++        if (d.size() && d[0] != 0)
++            statOf<statistics::Scalar>(p) += k * d[0];
++    } else if (auto *p =
++                   dynamic_cast<VectorInfoProxy<statistics::Vector> *>(i)) {
++        auto &s = statOf<statistics::Vector>(p);
++        for (size_t e = 0; e < d.size(); e++)
++            if (d[e] != 0)
++                s[e] += k * d[e];
++    } else if (auto *p = dynamic_cast<
++                   Vector2dInfoProxy<statistics::Vector2d> *>(i)) {
++        auto &s = statOf<statistics::Vector2d>(p);
++        size_t y = p->y;
++        for (size_t e = 0; e < d.size(); e++)
++            if (d[e] != 0)
++                s[e / y][e % y] += k * d[e];
++    }
++}
++
++void
++resetCand()
++{
++    c.started = false;
++    c.streak = 0;
++    c.cur.clear();
++    c.prev.clear();
++    c.prevOk = false;
++    measuring = false;
++}
++
++/** End a skip at curTick(). Memory writes and interrupt posts run before
++ *  the CPU tick of the same tick (exclusive); dumps/resets/drains after it. */
++void
++sync(bool inclusive)
++{
++    if (!skipping)
++        return;
++    skipping = false;
++    watching = false;
++    lines.clear();
++    resetCand();
++    EventQueue *eq = curEventQueue();
++    const Tick T = curTick();
++    const uint64_t m = T < skipH0 ? 0 :
++        (T - skipH0 + (inclusive ? skipP : skipP - 1)) / skipP;
++    uint64_t k = m / skipL, r = m % skipL;
++    // Replay a whole last iteration rather than none: credit() cannot
++    // restore per-slot state such as the instruction-count event queue's
++    // clock, which tick() sets at the start of each slot.
++    if (k && !r) {
++        k--;
++        r = skipL;
++    }
++    if (k) {
++        for (auto &[i, d] : dCpu)
++            creditStat(i, d, k);
++        for (auto &[i, d] : calMem)
++            creditStat(i, d, k);
++        hooks.credit(k, dCnt);
++    }
++    replaying = true;
++    for (uint64_t i = 0; i < r; i++) {
++        eq->setCurTick(skipH0 + (k * skipL + i) * skipP);
++        hooks.tickOnce();
++    }
++    replaying = false;
++    eq->setCurTick(T);
++    hooks.resume(skipH0 + m * skipP);
++}
++
++void
++lazyInit()
++{
++    inited = true;
++    collect(Root::root(), "");
++    warn_if(noSkip, "spin_fast_forward: classic caches or a memory with "
++            "latency_var present; spin loops will not be fast-forwarded.");
++    std::set<Info *> cpuInfos;
++    std::function<void(statistics::Group *)> rec =
++        [&](statistics::Group *g) {
++            for (auto *i : g->getStats())
++                cpuInfos.insert(i);
++            for (auto &[n, sg] : g->getStatGroups())
++                rec(sg);
++        };
++    rec(hooks.cpuGroup);
++    for (size_t i = 0; i < infos.size(); i++) {
++        if (cpuInfos.count(infos[i]))
++            cpuIdx.push_back(i);
++        else if (!isHost[i])
++            otherIdx.push_back(i);
++    }
++    statistics::registerDumpCallback([]() { sync(true); });
++    statistics::registerResetCallback([]() {
++        // Reset callbacks run after the stats were zeroed, but everything
++        // sync() credits and replays happened before the reset.
++        // An iteration being measured started from pre-reset CPU stats
++        // (cpuA), so its deltas are wrong: measure it again.
++        if (measuring) {
++            measuring = false;
++            c.streak = 0;
++        }
++        if (!skipping)
++            return;
++        sync(true);
++        // The same resets as m5.stats.reset(); the legacy list also holds
++        // stats without a name (e.g. baseStats.numInsts behind cpi/ipc).
++        Root::root()->resetStats();
++        for (auto *info : statistics::statsList())
++            info->reset();
++    });
++}
++
++bool
++arrive(const Ctx &x)
++{
++    c.idle = 0;
++    // Registers are compared only across two clean iterations: skip the
++    // snapshot after an impure one.
++    std::vector<RegVal> regs;
++    if (c.started && !c.impure)
++        regs = snapRegs(x.tc);
++    bool repeat = false;
++    if (c.started) {
++        Tick len = curTick() - c.start;
++        bool clean = !c.impure;
++        repeat = clean && c.prevOk && len == c.prevLen && c.cur == c.prev &&
++            regs == c.startRegs;
++        c.prev.swap(c.cur);
++        c.prevLen = len;
++        c.prevSlots = c.slots;
++        c.prevOk = clean;
++    }
++    c.cur.clear();
++    c.slots = 0;
++    c.impure = false;
++    c.start = curTick();
++    c.started = true;
++    c.startRegs = std::move(regs);
++
++    if (!repeat) {
++        c.streak = 0;
++        c.fails++;
++        measuring = false;
++        return false;
++    }
++    c.fails = 0;
++    c.streak++;
++    if (c.streak == 1) {
++        bool refuse = debugFlagsOn() || hooks.observed();
++        for (auto *cpu : otherCpus)
++            refuse = refuse || !cpu->switchedOut();
++        if (refuse) {
++            // Do not measure this loop again (as for badHeads below):
++            // checking again at every iteration costs more than it saves.
++            badHeads.insert(c.head);
++            c.active = false;
++            c.streak = 0;
++            return false;
++        }
++        // Misc regs (x87 TOP and status, MXCSR, ...) are compared across
++        // the measured iteration only: there are hundreds of them.
++        c.startMisc.clear();
++        if (snapMisc)
++            snapMisc(x.tc, c.startMisc);
++        // Measure the next iteration (a repeat of c.prev). The first slot
++        // of each access-kind mix gets a full snapshot of every non-CPU
++        // stat to find the memory-side stats a CPU access touches.
++        sig.assign(c.prevSlots + 1, 0);
++        size_t s = 0;
++        for (auto &r : c.prev) {
++            if (r.k == 0)
++                s++;
++            else if (s < sig.size())
++                sig[s] |= 1 << r.k;
++        }
++        snap(cpuIdx, cpuA);
++        cntA = x.cnt;
++        accMem.clear();
++        measuring = true;
++        return false;
++    }
++    if (c.streak != 2 || !measuring)
++        return false;
++    goodHeads.insert(c.head);
++    snap(cpuIdx, cpuB);
++    calMem.swap(accMem);
++    accMem.clear();
++    measuring = false;
++    std::vector<RegVal> misc;
++    if (snapMisc)
++        snapMisc(x.tc, misc);
++    if (c.prevLen != c.prevSlots * x.period || misc != c.startMisc) {
++        badHeads.insert(c.head);
++        c.active = false;
++        return false;
++    }
++    if (x.intrPending || !x.instQEmpty) {
++        c.streak = 0;
++        return false;
++    }
++    dCpu.clear();
++    bool ok = true;
++    for (size_t n = 0; n < cpuIdx.size(); n++) {
++        if (cpuA[n] == cpuB[n])
++            continue;
++        if (cpuA[n].size() != cpuB[n].size() ||
++            !creditable(infos[cpuIdx[n]]))
++            ok = false;
++        Vals d(cpuB[n].size());
++        for (size_t e = 0; e < d.size() && e < cpuA[n].size(); e++)
++            d[e] = cpuB[n][e] - cpuA[n][e];
++        dCpu.emplace_back(cpuIdx[n], std::move(d));
++    }
++    for (auto &[i, d] : calMem)
++        if (!creditable(infos[i]))
++            ok = false;
++    dCnt.assign(x.cnt.size(), 0.0);
++    for (size_t e = 0; e < x.cnt.size(); e++)
++        dCnt[e] = x.cnt[e] - cntA[e];
++    if (!ok) {
++        badHeads.insert(c.head);
++        c.active = false;
++        c.streak = 0;
++        return false;
++    }
++    lines.clear();
++    for (auto &r : c.prev) {
++        if (r.k == 0)
++            continue;
++        Addr pa = r.b, sz = r.a >> 56;
++        for (Addr l = pa & ~Addr(63); l < pa + sz; l += 64)
++            lines.insert(l);
++    }
++    watching = true;
++    skipping = true;
++    skipH0 = curTick();
++    skipP = x.period;
++    skipL = c.prevSlots;
++    return true;
++}
++
++void
++push(const Rec &r)
++{
++    // An impure iteration can never repeat, so its records are not needed.
++    if (!c.started || c.impure)
++        return;
++    if (c.cur.size() < MaxRec)
++        c.cur.push_back(r);
++    else
++        c.impure = true;
++}
++
++} // anonymous namespace
++
++bool
++atHead(Addr pc, bool atMacroStart)
++{
++    return c.active && atMacroStart && pc == c.head && !replaying;
++}
++
++bool
++preSlot(const Ctx *x)
++{
++    if (replaying)
++        return false;
++    if (!inited)
++        lazyInit();
++    if (c.active) {
++        c.idle++;
++        if (x && arrive(*x))
++            return true;
++    }
++    if (measuring) {
++        uint8_t s = c.slots < sig.size() ? sig[c.slots] : 0;
++        slotFull = s && sigDone.insert(s).second;
++        snap(slotFull ? otherIdx : memIdx, preMem);
++    }
++    return false;
++}
++
++void
++postSlot(Addr pc, MicroPC upc, bool haveInst, const PCStateBase &to,
++         bool impure)
++{
++    if (replaying)
++        return;
++    if (impure)
++        c.impure = true;
++    push(Rec{0, pc, upc, haveInst});
++    if (c.started)
++        c.slots++;
++    if (measuring) {
++        const auto &idx = slotFull ? otherIdx : memIdx;
++        snap(idx, postMem);
++        for (size_t n = 0; n < idx.size(); n++) {
++            if (postMem[n] == preMem[n])
++                continue;
++            if (slotFull && memIdxSet.insert(idx[n]).second)
++                memIdx.push_back(idx[n]);
++            Vals &acc = accMem[idx[n]];
++            if (acc.size() != postMem[n].size())
++                acc.assign(postMem[n].size(), 0.0);
++            for (size_t e = 0; e < acc.size() && e < preMem[n].size(); e++)
++                acc[e] += postMem[n][e] - preMem[n][e];
++        }
++    }
++    Addr t = to.instAddr();
++    if (!noSkip && t < pc && to.microPC() == 0 && t != c.head &&
++        !badHeads.count(t) &&
++        (!c.active || c.fails >= 8 || c.idle > 2 * MaxRec ||
++         (goodHeads.count(t) && !goodHeads.count(c.head)))) {
++        measuring = false;
++        c = Cand();
++        c.head = t;
++        c.active = true;
++    }
++}
++
++void
++mem(int k, Addr va, Addr pa, const uint8_t *d, unsigned n, bool impure)
++{
++    if (replaying)
++        return;
++    if (impure)
++        c.impure = true;
++    push(Rec{(uint64_t)k, va | ((uint64_t)n << 56), pa, dataKey(d, n)});
++}
++
++void
++impureAll()
++{
++    c.impure = true;
++}
++
++namespace
++{
++
++void
++memWriteNow(Addr addr, unsigned size)
++{
++    if (!skipping)
++        return;
++    for (Addr l = addr & ~Addr(63); l < addr + size; l += 64)
++        if (lines.count(l)) {
++            sync(false);
++            return;
++        }
++}
++
++} // anonymous namespace
++} // namespace spin_ff
++} // namespace gem5
++// ---- end SPIN_FF ----
++
+ namespace gem5
+ {
+ 
+@@ -78,6 +681,7 @@ AtomicSimpleCPU::AtomicSimpleCPU(const BaseAtomicSimpleCPUParams &p)
+       width(p.width), locked(false),
+       simulate_data_stalls(p.simulate_data_stalls),
+       simulate_inst_stalls(p.simulate_inst_stalls),
++      spinFF(p.spin_fast_forward),
+       icachePort(name() + ".icache_port"),
+       dcachePort(name() + ".dcache_port", this),
+       dcache_access(false), dcache_latency(0),
+@@ -88,6 +692,52 @@ AtomicSimpleCPU::AtomicSimpleCPU(const BaseAtomicSimpleCPUParams &p)
+     data_read_req = std::make_shared<Request>();
+     data_write_req = std::make_shared<Request>();
+     data_amo_req = std::make_shared<Request>();
++
++    if (spinFF) {
++        // The fast-forward state and hooks are process-global.
++        fatal_if(spin_ff::hooks.cpuGroup,
++                 "%s: spin_fast_forward is set on more than one CPU; it "
++                 "supports only one.", name());
++        fatal_if(numThreads != 1 || p.isa.empty() ||
++                 p.isa[0]->getIsaName() != "x86",
++                 "%s: spin_fast_forward supports only a single-threaded "
++                 "X86 CPU.", name());
++        warn("%s: spin_fast_forward is experimental; it is validated only "
++             "for single-CPU X86 AtomicSimpleCPU runs.", name());
++        spin_ff::hooks.cpuGroup = this;
++        spin_ff::hooks.credit =
++            [this](uint64_t k, const std::vector<double> &d) {
++                SimpleExecContext &t = *threadInfo[0];
++                t.numInst += k * d[0];
++                t.numOp += k * d[1];
++                t.numLoad += k * d[2];
++                instCnt += k * d[3];
++                // BaseCPUStats::numInsts/numOps have no Info (they only feed
++                // the cpi/ipc formulas), so no snapshot can see them
++                baseStats.numInsts += k * d[0];
++                baseStats.numOps += k * d[1];
++            };
++        spin_ff::memWriteHook = spin_ff::memWriteNow;
++        spin_ff::wakeHook = spin_ff::sync;
++        spin_ff::hooks.tickOnce = [this]() { tick(); };
++        // Skipped instructions are not retired one by one: probe listeners
++        // (SimPoint, PC/instruction trackers), progress events and a
++        // branch predictor (history, counters) would miss them.
++        spin_ff::hooks.observed = [this]() {
++            return params().progress_interval || branchPred ||
++                ppCommit->hasListeners() ||
++                ppRetiredInsts->hasListeners() ||
++                ppRetiredInstsPC->hasListeners() ||
++                ppRetiredLoads->hasListeners() ||
++                ppRetiredStores->hasListeners() ||
++                ppRetiredBranches->hasListeners() ||
++                ppAllCycles->hasListeners() ||
++                ppActiveCycles->hasListeners();
++        };
++        spin_ff::hooks.resume = [this](Tick when) {
++            schedule(tickEvent, when);
++        };
++    }
+ }
+ 
+ 
+@@ -101,6 +751,8 @@ AtomicSimpleCPU::~AtomicSimpleCPU()
+ DrainState
+ AtomicSimpleCPU::drain()
+ {
++    if (spinFF)
++        spin_ff::wake(true);
+     // Deschedule any power gating event (if any)
+     deschedulePowerGatingEvent();
+ 
+@@ -174,7 +826,9 @@ AtomicSimpleCPU::drainResume()
+ bool
+ AtomicSimpleCPU::tryCompleteDrain()
+ {
+-    if (drainState() != DrainState::Draining)
++    // drain() ends a spin-loop skip by replaying slots through tick();
++    // drain() itself reports whether the CPU is drained.
++    if (drainState() != DrainState::Draining || spin_ff::replaying)
+         return false;
+ 
+     DPRINTF(Drain, "tryCompleteDrain.\n");
+@@ -404,6 +1058,10 @@ AtomicSimpleCPU::readMem(Addr addr, uint8_t *data, unsigned size,
+ 
+             panic_if(pkt.isError(), "Data fetch (%s) failed: %s",
+                     pkt.getAddrRange().to_string(), pkt.print());
++            if (spinFF)
++                spin_ff::mem(1, frag_addr, req->getPaddr(), data, frag_size,
++                    req->isLLSC() || req->isLockedRMW() ||
++                    req->isUncacheable() || req->isLocalAccess());
+ 
+             if (req->isLLSC()) {
+                 thread->getIsaPtr()->handleLockedRead(req);
+@@ -507,6 +1165,11 @@ AtomicSimpleCPU::writeMem(uint8_t *data, unsigned size, Addr addr,
+                 dcache_access = true;
+                 panic_if(pkt.isError(), "Data write (%s) failed: %s",
+                         pkt.getAddrRange().to_string(), pkt.print());
++                if (spinFF)
++                    spin_ff::mem(2, frag_addr, req->getPaddr(), data,
++                        frag_size, req->isLLSC() || req->isLockedRMW() ||
++                        req->isUncacheable() || req->isLocalAccess() ||
++                        req->isSwap());
+                 if (req->isSwap()) {
+                     assert(res && curr_frag_id == 0);
+                     memcpy(res, pkt.getConstPtr<uint8_t>(), size);
+@@ -552,6 +1215,8 @@ AtomicSimpleCPU::amoMem(Addr addr, uint8_t* data, unsigned size,
+     // use the CPU's statically allocated amo request and packet objects
+     const RequestPtr &req = data_amo_req;
+ 
++    if (spinFF)
++        spin_ff::impureAll();
+     if (traceData)
+         traceData->setMem(addr, size, flags);
+ 
+@@ -631,6 +1296,21 @@ AtomicSimpleCPU::tick()
+     Tick latency = 0;
+ 
+     for (int i = 0; i < width || locked; ++i) {
++        if (spinFF) {
++            const PCStateBase &spc = thread->pcState();
++            if (spin_ff::atHead(spc.instAddr(), !curMacroStaticInst &&
++                    spc.microPC() == 0 && t_info.fetchOffset == 0)) {
++                spin_ff::Ctx x{thread->getTC(),
++                    {(double)t_info.numInst, (double)t_info.numOp,
++                     (double)t_info.numLoad, (double)instCnt},
++                    interrupts[curThread]->checkInterrupts(),
++                    thread->comInstEventQueue.empty(), clockPeriod()};
++                if (spin_ff::preSlot(&x))
++                    return;     // skipping: tick event stays descheduled
++            } else {
++                spin_ff::preSlot(nullptr);
++            }
++        }
+         baseStats.numCycles++;
+         updateCycleCounters(BaseCPU::CPU_STATE_ON);
+ 
+@@ -674,6 +1354,10 @@ AtomicSimpleCPU::tick()
+                 //{
+                     icache_access = true;
+                     icache_latency = fetchInstMem();
++                    if (spinFF)
++                        spin_ff::mem(3, ifetch_req->getVaddr(),
++                            ifetch_req->getPaddr(), nullptr,
++                            ifetch_req->getSize(), false);
+                 //}
+             }
+ 
+@@ -722,8 +1406,18 @@ AtomicSimpleCPU::tick()
+             }
+ 
+         }
++        const Addr spin_pc = thread->pcState().instAddr();
++        const MicroPC spin_upc = thread->pcState().microPC();
+         if (fault != NoFault || !t_info.stayAtPC)
+             advancePC(fault);
++        // A serializing or non-speculative instruction (rdtsc, cpuid,
++        // wrmsr, m5 ops, ...) may read state that changes with time
++        // rather than by a write, so its loop is never skipped.
++        if (spinFF)
++            spin_ff::postSlot(spin_pc, spin_upc, (bool)curStaticInst,
++                thread->pcState(), fault != NoFault || (curStaticInst &&
++                    (curStaticInst->isSerializing() ||
++                     curStaticInst->isNonSpeculative())));
+     }
+ 
+     if (tryCompleteDrain())
+@@ -733,7 +1427,7 @@ AtomicSimpleCPU::tick()
+     if (latency < clockPeriod())
+         latency = clockPeriod();
+ 
+-    if (_status != Idle)
++    if (_status != Idle && !spin_ff::replaying)
+         reschedule(tickEvent, curTick() + latency, true);
+ }
+ 
+diff --git a/src/cpu/simple/atomic.hh b/src/cpu/simple/atomic.hh
+index a194f107d3..08778eda2a 100644
+--- a/src/cpu/simple/atomic.hh
++++ b/src/cpu/simple/atomic.hh
+@@ -66,6 +66,7 @@ class AtomicSimpleCPU : public BaseSimpleCPU
+     bool locked;
+     const bool simulate_data_stalls;
+     const bool simulate_inst_stalls;
++    const bool spinFF;  // spin_fast_forward param (see atomic.cc)
+ 
+     // main simulation loop (one cycle)
+     void tick();
+diff --git a/src/cpu/simple/base.cc b/src/cpu/simple/base.cc
+index e2ea96aa08..7dd9700228 100644
+--- a/src/cpu/simple/base.cc
++++ b/src/cpu/simple/base.cc
+@@ -56,6 +56,7 @@
+ #include "cpu/null_static_inst.hh"
+ #include "cpu/pred/bpred_unit.hh"
+ #include "cpu/simple/exec_context.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "cpu/simple_thread.hh"
+ #include "cpu/smt.hh"
+ #include "cpu/static_inst.hh"
+@@ -207,6 +208,8 @@ BaseSimpleCPU::countCommitInst()
+ Counter
+ BaseSimpleCPU::totalInsts() const
+ {
++    // Skipped spin-loop iterations are counted when the skip ends.
++    spin_ff::wake(true);
+     Counter total_inst = 0;
+     for (auto& t_info : threadInfo) {
+         total_inst += t_info->numInst;
+@@ -218,6 +221,7 @@ BaseSimpleCPU::totalInsts() const
+ Counter
+ BaseSimpleCPU::totalOps() const
+ {
++    spin_ff::wake(true);
+     Counter total_op = 0;
+     for (auto& t_info : threadInfo) {
+         total_op += t_info->numOp;
+diff --git a/src/cpu/simple/spin_ff.hh b/src/cpu/simple/spin_ff.hh
+new file mode 100644
+index 0000000000..e1c6b5f313
+--- /dev/null
++++ b/src/cpu/simple/spin_ff.hh
+@@ -0,0 +1,84 @@
++/*
++ * Copyright (c) 2026 The gem5-opt contributors (see the git history).
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met: redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer;
++ * redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution;
++ * neither the name of the copyright holders nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/*
++ * Spin-loop fast-forward hooks (exact skip of pure guest spin loops).
++ *
++ * A component that can change what a spinning AtomicSimpleCPU loop observes
++ * calls these *before* making the change; they end the skip first.
++ *
++ * Everything here is inline so that builds without the CPU (no ISA) still
++ * link; the CPU that sets spin_fast_forward installs the hooks.
++ */
++
++#ifndef __CPU_SIMPLE_SPIN_FF_HH__
++#define __CPU_SIMPLE_SPIN_FF_HH__
++
++#include <vector>
++
++#include "base/types.hh"
++
++namespace gem5
++{
++
++class ThreadContext;
++
++namespace spin_ff
++{
++
++/** True while a spinning loop is being fast-forwarded. */
++inline bool watching = false;
++
++inline void (*memWriteHook)(Addr addr, unsigned size) = nullptr;
++inline void (*wakeHook)(bool after) = nullptr;
++
++/** Set by the ISA: append the thread's misc regs (read without side
++ *  effects) to v, for the "same state" test of a loop iteration. */
++inline void (*snapMisc)(ThreadContext *tc, std::vector<RegVal> &v) = nullptr;
++
++/** Before a write to simulated memory by anything but the spinning CPU. */
++inline void
++memWrite(Addr addr, unsigned size)
++{
++    if (watching)
++        memWriteHook(addr, size);
++}
++
++/** Before an external change to the spinning CPU's interrupt state, or
++ *  before something reads its state (after = true: an event that follows
++ *  the CPU tick of the same tick). */
++inline void
++wake(bool after = false)
++{
++    if (watching)
++        wakeHook(after);
++}
++
++} // namespace spin_ff
++} // namespace gem5
++
++#endif // __CPU_SIMPLE_SPIN_FF_HH__
+diff --git a/src/dev/dma_device.cc b/src/dev/dma_device.cc
+index e68b796dfa..01893ff3d6 100644
+--- a/src/dev/dma_device.cc
++++ b/src/dev/dma_device.cc
+@@ -48,6 +48,7 @@
+ 
+ #include "base/logging.hh"
+ #include "base/trace.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "debug/DMA.hh"
+ #include "debug/Drain.hh"
+ #include "sim/clocked_object.hh"
+@@ -372,8 +373,11 @@ DmaPort::sendAtomicBdReq(DmaReqState *state)
+             uint8_t *state_data = state->data + state->gen.complete();
+             if (MemCmd(state->cmd).isRead())
+                 memcpy(state_data, bd_data, handled);
+-            else
++            else {
++                if (spin_ff::watching)
++                    spin_ff::memWrite(state->gen.addr(), handled);
+                 memcpy(bd_data, state_data, handled);
++            }
+         }
+ 
+         // Advance the chunk generator past this region of memory.
+diff --git a/src/mem/abstract_mem.cc b/src/mem/abstract_mem.cc
+index f211065033..7be5634d78 100644
+--- a/src/mem/abstract_mem.cc
++++ b/src/mem/abstract_mem.cc
+@@ -44,6 +44,7 @@
+ 
+ #include "base/loader/memory_image.hh"
+ #include "base/loader/object_file.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "cpu/thread_context.hh"
+ #include "debug/LLSC.hh"
+ #include "debug/MemoryAccess.hh"
+@@ -375,6 +376,8 @@ tracePacket(System *sys, const char *label, PacketPtr pkt)
+ void
+ AbstractMemory::access(PacketPtr pkt)
+ {
++    if (spin_ff::watching && (pkt->isWrite() || pkt->isAtomicOp()))
++        spin_ff::memWrite(pkt->getAddr(), pkt->getSize());
+     if (pkt->cacheResponding()) {
+         DPRINTF(MemoryAccess, "Cache responding to %#llx: not responding\n",
+                 pkt->getAddr());
+@@ -484,6 +487,8 @@ AbstractMemory::access(PacketPtr pkt)
+ void
+ AbstractMemory::functionalAccess(PacketPtr pkt)
+ {
++    if (spin_ff::watching && pkt->isWrite())
++        spin_ff::memWrite(pkt->getAddr(), pkt->getSize());
+     assert(pkt->getAddrRange().isSubset(range));
+ 
+     uint8_t *host_addr = toHostAddr(pkt->getAddr());
+diff --git a/src/python/pybind11/event.cc b/src/python/pybind11/event.cc
+index 9c5fc674f2..a8edf4b5da 100644
+--- a/src/python/pybind11/event.cc
++++ b/src/python/pybind11/event.cc
+@@ -44,6 +44,7 @@
+ #include "pybind11/stl.h"
+ 
+ #include "base/logging.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "sim/eventq.hh"
+ #include "sim/sim_events.hh"
+ #include "sim/sim_exit.hh"
+@@ -73,6 +74,8 @@ class PyEvent : public Event
+     }
+ 
+     void process() override {
++        // The Python code may read or change a spinning CPU's state.
++        spin_ff::wake(priority() > Event::CPU_Tick_Pri);
+         // Call the Python implementation as __call__. This provides a
+         // slightly more Python-friendly interface.
+         PYBIND11_OVERLOAD_PURE_NAME(void, PyEvent, "__call__", process);
+diff --git a/src/sim/sim_events.cc b/src/sim/sim_events.cc
+index 58f6d10f58..429f128298 100644
+--- a/src/sim/sim_events.cc
++++ b/src/sim/sim_events.cc
+@@ -45,6 +45,7 @@
+ #include <string>
+ 
+ #include "base/callback.hh"
++#include "cpu/simple/spin_ff.hh"
+ #include "sim/eventq.hh"
+ #include "sim/sim_exit.hh"
+ #include "sim/stats.hh"
+@@ -98,6 +99,9 @@ GlobalSimLoopExitEvent::description() const
+ void
+ GlobalSimLoopExitEvent::process()
+ {
++    // Python may read or change a spinning CPU's state while the loop is
++    // exited: end a spin-loop skip first.
++    spin_ff::wake(barrierEvent[0]->priority() > Event::CPU_Tick_Pri);
+     if (repeat) {
+         schedule(curTick() + repeat);
+     }
+-- 
+2.43.0
+
